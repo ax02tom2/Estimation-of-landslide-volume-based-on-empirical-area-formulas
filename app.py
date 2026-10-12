@@ -1,18 +1,18 @@
 import streamlit as st
 import pandas as pd
-from PIL import Image
 import folium
 from folium.plugins import Draw
 from streamlit_folium import st_folium
-from shapely.geometry import shape, Polygon, MultiPolygon
+from shapely.geometry import shape
 from pyproj import Geod
 import geopandas as gpd
 import json
 import zipfile
-import io
 import os
 import tempfile
 from branca.element import Element
+from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderTimedOut
 
 # -----------------------------------------------------------------------------
 # 系統設定
@@ -35,7 +35,6 @@ FORMULAS = [
 ]
 
 def render_results(area_m2):
-    """結果渲染模組 (卡片式對齊)"""
     if area_m2 <= 0:
         return
         
@@ -62,9 +61,15 @@ def render_results(area_m2):
                 """, unsafe_allow_html=True)
 
 def process_spatial_file(uploaded_file):
-    """處理上傳的空間檔案，支援 ZIP(Shapefile), KML, KMZ, GeoJSON"""
+    """處理上傳的空間檔案，回傳 GeoJSON、面積與 Bounding Box"""
     try:
-        gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
+        # 修正 1：安全載入 KML 驅動，避免 'NoneType' 錯誤
+        try:
+            import fiona
+            fiona.drvsupport.supported_drivers['KML'] = 'rw'
+        except Exception:
+            pass 
+
         file_ext = uploaded_file.name.split('.')[-1].lower()
         gdf = None
         
@@ -84,35 +89,33 @@ def process_spatial_file(uploaded_file):
                 shp_files = [f for f in os.listdir(tmpdir) if f.endswith('.shp')]
                 if not shp_files:
                     st.error("ZIP 壓縮檔內找不到 .shp 檔案！")
-                    return None, 0
+                    return None, 0, None
                 shp_path = os.path.join(tmpdir, shp_files[0])
                 gdf = gpd.read_file(shp_path)
         else:
-            return None, 0
+            return None, 0, None
 
-        # 強制轉換為 WGS84
         if gdf.crs and gdf.crs.to_epsg() != 4326:
             gdf = gdf.to_crs(epsg=4326)
         elif gdf.crs is None:
              gdf.set_crs(epsg=4326, inplace=True)
 
-        # 計算 WGS84 面積
         geod = Geod(ellps="WGS84")
         total_area = 0
         for geom in gdf.geometry:
             if geom.type == 'Polygon' or geom.type == 'MultiPolygon':
                 area, _ = geod.geometry_area_perimeter(geom)
                 total_area += abs(area)
-                
-        return json.loads(gdf.to_json()), total_area
+        
+        # 修正 2：計算圖層的絕對邊界 [minx, miny, maxx, maxy]
+        bounds = gdf.total_bounds 
+        
+        return json.loads(gdf.to_json()), total_area, bounds
         
     except Exception as e:
         st.error(f"檔案解析失敗: {str(e)}")
-        return None, 0
+        return None, 0, None
 
-# -----------------------------------------------------------------------------
-# 注入 Folium 畫圖節點縮小修正 (極小紅點)
-# -----------------------------------------------------------------------------
 def inject_folium_draw_fix(m):
     js_injection = """
     <script>
@@ -150,12 +153,12 @@ def inject_folium_draw_fix(m):
     """
     m.get_root().header.add_child(Element(css_injection))
 
+
 # -----------------------------------------------------------------------------
-# 主功能切換 Tabs (已精簡，徹底刪除自訂影像上傳)
+# 主功能切換 Tabs
 # -----------------------------------------------------------------------------
 tab1, tab2 = st.tabs(["🔢 1. 數值直接輸入", "🗺️ 2. 衛星底圖圈繪 (含 GIS 檔案)"])
 
-# ====== Tab 1: 數值直接輸入 ======
 with tab1:
     st.subheader("手動輸入面積 (自動換算單位)")
     col_input, col_unit = st.columns([2, 1])
@@ -174,71 +177,80 @@ with tab1:
     if base_area_m2 > 0:
         render_results(base_area_m2)
 
-# ====== Tab 2: 衛星底圖圈繪 (含檔案上傳) ======
 with tab2:
     st.subheader("在地圖上圈繪或上傳崩塌範圍")
     st.info("💡 說明：左側工具列可直接圈繪。若要上傳既有範圍，Shapefile 格式請將相關檔案打包成 ZIP 壓縮檔上傳。")
     
-    col_map, col_upload = st.columns([3, 1])
+    col_search, col_upload = st.columns([2, 2])
+    
+    # 修正 3：新增地名搜尋功能
+    map_center = [23.6978, 120.9605]
+    map_zoom = 7
+    fit_bounds_coords = None
+    
+    with col_search:
+        st.write("🔍 **快速定位地區**")
+        search_query = st.text_input("輸入鄉鎮市區、村里或地址 (例如：南投縣仁愛鄉)", placeholder="輸入後按 Enter 搜尋...")
+        if search_query:
+            try:
+                geolocator = Nominatim(user_agent="landslide_app")
+                location = geolocator.geocode(search_query, timeout=5)
+                if location:
+                    map_center = [location.latitude, location.longitude]
+                    map_zoom = 13
+                    st.success(f"📍 已定位至：{location.address}")
+                else:
+                    st.warning("找不到該地區，請嘗試更換關鍵字。")
+            except GeocoderTimedOut:
+                st.error("地名搜尋服務超時，請稍後再試。")
+            except Exception as e:
+                st.error(f"搜尋發生錯誤: {str(e)}")
+
     with col_upload:
         st.write("📂 **上傳空間範圍檔 (ZIP/KML/GeoJSON)**")
-        spatial_file = st.file_uploader("支援 ZIP(Shapefile), KML, KMZ, GeoJSON", type=['zip', 'kml', 'kmz', 'geojson'])
+        spatial_file = st.file_uploader("支援 ZIP(Shapefile), KML, KMZ, GeoJSON", type=['zip', 'kml', 'kmz', 'geojson'], label_visibility="collapsed")
     
-    map_center = [23.6978, 120.9605] # 預設台灣中心
-    map_zoom = 7
     uploaded_geojson = None
     uploaded_area = 0
 
     if spatial_file:
-        uploaded_geojson, uploaded_area = process_spatial_file(spatial_file)
-        # 自動定位到上傳圖層的中心
-        if uploaded_geojson and len(uploaded_geojson.get('features', [])) > 0:
-            try:
-                first_geom = uploaded_geojson['features'][0]['geometry']
-                if first_geom['type'] == 'Polygon':
-                    coords = first_geom['coordinates'][0][0]
-                elif first_geom['type'] == 'MultiPolygon':
-                    coords = first_geom['coordinates'][0][0][0]
-                else:
-                    coords = None
-                
-                if coords:
-                    map_center = [coords[1], coords[0]]
-                    map_zoom = 15
-            except:
-                pass 
+        uploaded_geojson, uploaded_area, uploaded_bounds = process_spatial_file(spatial_file)
+        # 修正 2：如果有上傳檔案，嚴格設定 Bounding Box 以完全包含圖形
+        if uploaded_bounds is not None:
+            minx, miny, maxx, maxy = uploaded_bounds
+            fit_bounds_coords = [[miny, minx], [maxy, maxx]]
 
-    with col_map:
-        m = folium.Map(location=map_center, zoom_start=map_zoom) 
+    m = folium.Map(location=map_center, zoom_start=map_zoom) 
+    
+    # 如果有邊界需要自動縮放 (優先度最高)
+    if fit_bounds_coords:
+        m.fit_bounds(fit_bounds_coords)
         
-        # 呼叫縮小節點的函式
-        inject_folium_draw_fix(m) 
-        
-        # 預設 Google 衛星圖
-        folium.TileLayer(
-            tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-            attr='Google',
-            name='Google Satellite',
-            overlay=False,
-            control=True
+    inject_folium_draw_fix(m) 
+    
+    folium.TileLayer(
+        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+        attr='Google',
+        name='Google Satellite',
+        overlay=False,
+        control=True
+    ).add_to(m)
+    
+    if uploaded_geojson:
+        folium.GeoJson(
+            uploaded_geojson,
+            style_function=lambda x: {'fillColor': '#ff0000', 'color': '#ff0000', 'weight': 2, 'fillOpacity': 0.4}
         ).add_to(m)
         
-        if uploaded_geojson:
-            folium.GeoJson(
-                uploaded_geojson,
-                style_function=lambda x: {'fillColor': '#ff0000', 'color': '#ff0000', 'weight': 2, 'fillOpacity': 0.4}
-            ).add_to(m)
-            
-        Draw(export=True, position='topleft', draw_options={
-            'polyline': False, 'rectangle': False, 'circle': False, 
-            'circlemarker': False, 'marker': False, 
-            'polygon': {'allowIntersection': False}
-        }).add_to(m)
-        
-        map_data = st_folium(m, width="100%", height=500, key="folium_map_satellite")
+    Draw(export=True, position='topleft', draw_options={
+        'polyline': False, 'rectangle': False, 'circle': False, 
+        'circlemarker': False, 'marker': False, 
+        'polygon': {'allowIntersection': False}
+    }).add_to(m)
+    
+    map_data = st_folium(m, width="100%", height=500, key="folium_map_satellite")
     
     final_area = 0
-    # 以最後手動繪製的幾何為主
     if map_data and map_data.get("all_drawings") and len(map_data["all_drawings"]) > 0:
         latest_drawing = map_data["all_drawings"][-1]
         if latest_drawing["geometry"]["type"] == "Polygon":
@@ -248,7 +260,6 @@ with tab2:
             final_area = abs(area)
             st.success("✅ 已套用手動圈繪範圍面積。")
             
-    # 若無手動繪製，則採用上傳檔案的總面積
     elif spatial_file and uploaded_area > 0:
         final_area = uploaded_area
         st.success("✅ 已套用上傳圖層面積。")
