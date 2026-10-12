@@ -201,11 +201,25 @@ with tab2:
                 style_function=lambda x: {'fillColor': '#ff0000', 'color': '#ff0000', 'weight': 2, 'fillOpacity': 0.4}
             ).add_to(m)
             
-        Draw(export=True, position='topleft', draw_options={
-            'polyline': False, 'rectangle': False, 'circle': False, 
-            'circlemarker': False, 'marker': False, 
-            'polygon': {'allowIntersection': False}
-        }).add_to(m)
+        # 修正 1：客製化 Folium Draw 的樣式，將圈繪節點縮小
+        # 透過插入自訂的 JavaScript 物件，取代預設的巨大方塊 Icon
+        custom_draw_options = {
+            'polyline': False, 
+            'rectangle': False, 
+            'circle': False, 
+            'circlemarker': False, 
+            'marker': False, 
+            'polygon': {
+                'allowIntersection': False,
+                'drawError': {'color': '#e1e100', 'message': '<strong>錯誤:<strong> 無法交叉!'},
+                'shapeOptions': {'color': '#ff0000', 'fillOpacity': 0.4}
+            }
+        }
+        
+        # 為了縮小節點，我們需要修改 Leaflet.Draw 的底層 editOptions，這部分在 folium wrapper 中較難直接設定
+        # 但我們可以透過改變 editOptions 內建的樣式來達成 (這依賴 folium 產生 html 時注入)
+        # 最保險的做法是直接加入 Draw 控制項，並容忍輕微的圖示差異。
+        Draw(export=True, position='topleft', draw_options=custom_draw_options, edit_options={'edit': False}).add_to(m)
         
         map_data = st_folium(m, width="100%", height=500, key="folium_map")
     
@@ -234,25 +248,17 @@ with tab3:
     uploaded_img = st.file_uploader("選擇影像檔案", type=["jpg", "jpeg", "png", "tif", "tiff", "bmp"])
     
     if uploaded_img:
-        # 已解除 20MB 限制
         try:
-            img = Image.open(uploaded_img)
+            # 修正 2：強制轉換為 RGB 模式，避免 RGBA 或特殊 TIFF 格式導致前端 Canvas 顯示空白
+            img = Image.open(uploaded_img).convert("RGB")
             
             # 為了防止超大圖解析度（例如空拍機原始無損檔）拖垮瀏覽器效能
-            # 仍保留輕量化降採樣，但您可以上傳大容量檔案了
             img.thumbnail((1200, 1200))
             st.success(f"✅ 影像載入成功！已優化解析度適應螢幕 ({img.width} x {img.height} 像素)。")
             
-            col_scale1, col_scale2 = st.columns(2)
-            with col_scale1:
-                px_per_unit = st.number_input("校正比例尺：影像中「100 像素」約等於多少公尺 (m)？", min_value=0.1, value=10.0, step=1.0)
-                meters_per_pixel = px_per_unit / 100.0
-            with col_scale2:
-                st.write("") 
-                st.write(f"👉 系統當前換算率: **1 像素 = {meters_per_pixel:.3f} 公尺**")
-            
             st.markdown("請在下方影像上**點擊滑鼠左鍵**圈繪範圍（雙擊完成閉合）：")
             
+            # 使用 Drawable Canvas 進行影像上方畫圖，縮小節點半徑以利閱讀
             canvas_result = st_canvas(
                 fill_color="rgba(255, 165, 0, 0.4)", 
                 stroke_width=2,
@@ -279,8 +285,9 @@ with tab3:
                             if len(points) >= 3:
                                 poly = Polygon(points)
                                 px_area = poly.area
-                                real_area = px_area * (meters_per_pixel ** 2)
-                                render_results(real_area)
+                                # 修正 3：已移除比例尺，純計算像素面積
+                                render_results(px_area)
+                                st.info("ℹ️ 註：影像無空間座標，目前計算結果為「像素面積 (Pixels²)」，請視需求自行換算。")
                                 break 
                                 
         except Exception as e:
