@@ -95,4 +95,200 @@ def process_spatial_file(uploaded_file):
                 shp_files = [f for f in os.listdir(tmpdir) if f.endswith('.shp')]
                 if not shp_files:
                     st.error("ZIP 壓縮檔內找不到 .shp 檔案！")
-                    return None,
+                    return None, 0
+                    
+                shp_path = os.path.join(tmpdir, shp_files[0])
+                gdf = gpd.read_file(shp_path)
+                
+        else:
+            st.error("不支援的檔案格式")
+            return None, 0
+
+        # 如果圖層不是 WGS84 (EPSG:4326)，進行轉換以利 Folium 顯示與計算
+        if gdf.crs and gdf.crs.to_epsg() != 4326:
+            gdf = gdf.to_crs(epsg=4326)
+        elif gdf.crs is None:
+             # 如果沒有 CRS (例如某些不完整的 shapefile)，預設當作 WGS84 處理並給予警告
+             st.warning("⚠️ 上傳的檔案缺乏座標系統(CRS)資訊，系統預設將其視為 WGS84 經緯度進行處理，結果可能存在誤差。")
+             gdf.set_crs(epsg=4326, inplace=True)
+
+        # 計算 WGS84 真實面積
+        geod = Geod(ellps="WGS84")
+        total_area = 0
+        for geom in gdf.geometry:
+            if geom.type == 'Polygon' or geom.type == 'MultiPolygon':
+                area, _ = geod.geometry_area_perimeter(geom)
+                total_area += abs(area)
+                
+        return json.loads(gdf.to_json()), total_area
+        
+    except Exception as e:
+        # 遵循 Gemini Python 規範：印出完整錯誤
+        st.error(f"檔案解析失敗: {str(e)}")
+        return None, 0
+
+# -----------------------------------------------------------------------------
+# 主功能切換 Tabs
+# -----------------------------------------------------------------------------
+tab1, tab2, tab3 = st.tabs(["🔢 1. 數值直接輸入", "🗺️ 2. 衛星底圖圈繪 (含 GIS 檔案上傳)", "🖼️ 3. 自訂影像上傳 (離線/最新)"])
+
+# ====== Tab 1: 數值直接輸入 ======
+with tab1:
+    st.subheader("手動輸入面積 (自動換算單位)")
+    col_input, col_unit = st.columns([2, 1])
+    with col_input:
+        input_area = st.number_input("輸入面積數值", min_value=0.0, value=0.0, step=0.1)
+    with col_unit:
+        unit_choice = st.selectbox("選擇輸入單位", ["平方公尺 (m²)", "公頃 (ha)", "平方公里 (km²)"])
+    
+    if unit_choice == "公頃 (ha)":
+        base_area_m2 = input_area * 10000
+    elif unit_choice == "平方公里 (km²)":
+        base_area_m2 = input_area * 1000000
+    else:
+        base_area_m2 = input_area
+        
+    if base_area_m2 > 0:
+        render_results(base_area_m2)
+
+# ====== Tab 2: 衛星底圖圈繪 (含檔案上傳) ======
+with tab2:
+    st.subheader("在地圖上圈繪或上傳崩塌範圍 (Shapefile/KML/GeoJSON)")
+    st.info("💡 說明：上傳 Shapefile 請將 `.shp`, `.shx`, `.dbf`, `.prj` 等檔案**打包成一個 ZIP 壓縮檔**上傳。")
+    
+    col_map, col_upload = st.columns([3, 1])
+    
+    with col_upload:
+        st.write("📂 **上傳空間範圍檔**")
+        spatial_file = st.file_uploader("支援 ZIP(Shapefile), KML, KMZ, GeoJSON", type=['zip', 'kml', 'kmz', 'geojson'])
+    
+    # 預設中心點
+    map_center = [23.6978, 120.9605]
+    map_zoom = 7
+    uploaded_geojson = None
+    uploaded_area = 0
+
+    if spatial_file:
+        uploaded_geojson, uploaded_area = process_spatial_file(spatial_file)
+        if uploaded_geojson and len(uploaded_geojson.get('features', [])) > 0:
+            # 計算中心點以自動平移 (處理 Polygon 或 MultiPolygon)
+            try:
+                first_geom = uploaded_geojson['features'][0]['geometry']
+                if first_geom['type'] == 'Polygon':
+                    coords = first_geom['coordinates'][0][0]
+                elif first_geom['type'] == 'MultiPolygon':
+                    coords = first_geom['coordinates'][0][0][0]
+                else:
+                    coords = None
+                
+                if coords:
+                    map_center = [coords[1], coords[0]]
+                    map_zoom = 15
+            except Exception as e:
+                pass # 無法自動定位時維持預設
+
+    with col_map:
+        m = folium.Map(location=map_center, zoom_start=map_zoom) 
+        
+        # 加入免費的 Google 衛星影像作為底圖
+        folium.TileLayer(
+            tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+            attr='Google',
+            name='Google Satellite',
+            overlay=False,
+            control=True
+        ).add_to(m)
+        
+        # 如果有上傳檔案，將其加入地圖
+        if uploaded_geojson:
+            folium.GeoJson(
+                uploaded_geojson,
+                style_function=lambda x: {'fillColor': '#ff0000', 'color': '#ff0000', 'weight': 2, 'fillOpacity': 0.4}
+            ).add_to(m)
+            
+        # 限制只能畫多邊形
+        Draw(export=True, position='topleft', draw_options={
+            'polyline': False, 'rectangle': False, 'circle': False, 
+            'circlemarker': False, 'marker': False, 
+            'polygon': {'allowIntersection': False}
+        }).add_to(m)
+        
+        map_data = st_folium(m, width="100%", height=500, key="folium_map")
+    
+    # 計算面積邏輯：手動圈繪優先 > 上傳檔案
+    final_area = 0
+    if map_data and map_data.get("all_drawings") and len(map_data["all_drawings"]) > 0:
+        latest_drawing = map_data["all_drawings"][-1]
+        if latest_drawing["geometry"]["type"] == "Polygon":
+            geom = shape(latest_drawing["geometry"])
+            geod = Geod(ellps="WGS84")
+            area, _ = geod.geometry_area_perimeter(geom)
+            final_area = abs(area)
+            st.success("✅ 已套用手動圈繪範圍面積。")
+    elif spatial_file and uploaded_area > 0:
+        final_area = uploaded_area
+        st.success(f"✅ 已套用上傳檔案之範圍面積。")
+        
+    if final_area > 0:
+         render_results(final_area)
+
+
+# ====== Tab 3: 自訂影像上傳 (離線/最新) ======
+with tab3:
+    st.subheader("上傳最新空拍或正射影像 (解決底圖過舊問題)")
+    st.info("💡 說明：支援多種常見影像格式。為不遮擋圖面，圈繪點已設定為微小節點。")
+    
+    uploaded_img = st.file_uploader("選擇影像檔案", type=["jpg", "jpeg", "png", "tif", "tiff", "bmp"])
+    
+    if uploaded_img:
+        if uploaded_img.size > 20 * 1024 * 1024:
+            st.error("❌ 檔案過大！為防止雲端主機 OOM 崩潰，請上傳小於 20MB 的圖片。")
+            st.stop()
+            
+        try:
+            img = Image.open(uploaded_img)
+            img.thumbnail((1200, 1200))
+            st.success(f"✅ 影像安全載入！已自動優化解析度適應螢幕 ({img.width} x {img.height} 像素)。")
+            
+            col_scale1, col_scale2 = st.columns(2)
+            with col_scale1:
+                px_per_unit = st.number_input("校正比例尺：影像中「100 像素」約等於多少公尺 (m)？", min_value=0.1, value=10.0, step=1.0)
+                meters_per_pixel = px_per_unit / 100.0
+            with col_scale2:
+                st.write("") 
+                st.write(f"👉 系統當前換算率: **1 像素 = {meters_per_pixel:.3f} 公尺**")
+            
+            st.markdown("請在下方影像上**點擊滑鼠左鍵**圈繪範圍（雙擊完成閉合）：")
+            
+            canvas_result = st_canvas(
+                fill_color="rgba(255, 165, 0, 0.4)", 
+                stroke_width=2,
+                stroke_color="#ff0000",
+                background_image=img,
+                update_streamlit=True,
+                height=img.height,
+                width=img.width,
+                drawing_mode="polygon",
+                point_display_radius=2, 
+                key="canvas_image",
+            )
+            
+            if canvas_result.json_data is not None:
+                objects = canvas_result.json_data["objects"]
+                if objects:
+                    for obj in objects:
+                        if obj["type"] == "path":
+                            points = []
+                            for cmd in obj["path"]:
+                                if cmd[0] in ['M', 'L'] and len(cmd) >= 3:
+                                    points.append((cmd[1], cmd[2]))
+                            
+                            if len(points) >= 3:
+                                poly = Polygon(points)
+                                px_area = poly.area
+                                real_area = px_area * (meters_per_pixel ** 2)
+                                render_results(real_area)
+                                break 
+                                
+        except Exception as e:
+            st.error(f"⚠️ 影像處理或計算時發生錯誤: {str(e)}")
