@@ -17,7 +17,7 @@ from geopy.exc import GeocoderTimedOut, GeocoderServiceError
 # -----------------------------------------------------------------------------
 # 系統設定
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="崩塌量體推估系統", layout="wide")
+st.set_page_config(page_title="崩塌量體推估系統", page_icon="⛰️", layout="wide")
 
 st.title("⛰️ 崩塌量體推估系統 (面積經驗公式對照)")
 st.markdown("本系統整合多組實證經驗公式，支援**手動輸入**及**線上衛星底圖/空間檔案上傳**，快速推估崩塌量體 (V) 與平均滑動深度 (D)。")
