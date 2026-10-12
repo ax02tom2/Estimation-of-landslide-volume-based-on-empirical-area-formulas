@@ -116,7 +116,6 @@ def process_spatial_file(uploaded_file):
         else:
             return None, 0, None
 
-        # 🚀 靜默處理 TWD97，無警告標語
         if gdf.crs is None:
             minx, miny, maxx, maxy = gdf.total_bounds
             if minx > 180:
@@ -174,16 +173,12 @@ def inject_folium_draw_fix(m):
     """
     m.get_root().header.add_child(Element(css_injection))
 
-# -----------------------------------------------------------------------------
-# 模組化：安全執行 Geocoding，防止 API 崩潰
-# -----------------------------------------------------------------------------
 def safe_geocode(query):
     try:
         geolocator = Nominatim(user_agent="landslide_geo_app_tw")
         location = geolocator.geocode(query, timeout=3)
         return location
     except (GeocoderTimedOut, GeocoderServiceError):
-        # 發生錯誤時默默吞下，不報紅字
         return None
     except Exception:
         return None
@@ -223,16 +218,13 @@ with tab2:
         st.write("### ⚙️ 操作面板")
         st.markdown("---")
         
-        # 🚀 功能 1：強制並列的連動下拉選單
         st.write("📍 **1. 快速定位鄉鎮市區**")
         city_options = list(TW_DISTRICTS.keys())
         selected_city = st.selectbox("選擇縣市：", city_options, key="city_selector")
         
-        # 無論是否選擇，第二層選單永遠存在於 UI 上
         district_options = TW_DISTRICTS[selected_city]
         selected_district = st.selectbox("選擇鄉鎮市區：", district_options, key="district_selector")
         
-        # 只有當選定鄉鎮後，才執行定位
         if selected_city != "請選擇縣市..." and selected_district != "請先選擇縣市":
             search_target = f"台灣 {selected_city} {selected_district}"
             location = safe_geocode(search_target)
@@ -241,7 +233,6 @@ with tab2:
                 map_zoom = 13
                 st.success(f"已精確定位：{selected_city}{selected_district}")
 
-        # 功能 2：精確文字搜尋 (選用)
         st.write("🔍 **2. 進階地名/地址搜尋**")
         search_query = st.text_input("輸入詳細地址或地標", placeholder="例如：阿里山鄉...")
         if search_query:
@@ -252,7 +243,6 @@ with tab2:
         
         st.markdown("---")
         
-        # 功能 3：上傳空間檔案
         st.write("📂 **3. 上傳空間範圍檔**")
         st.caption("支援 ZIP(Shapefile), KML, KMZ, GeoJSON")
         spatial_file = st.file_uploader("上傳檔案", type=['zip', 'kml', 'kmz', 'geojson'], label_visibility="collapsed")
@@ -279,10 +269,11 @@ with tab2:
             control=True
         ).add_to(m)
         
+        # 修改上傳圖層顯示樣式：無底色 (fillOpacity: 0)，保留紅框
         if uploaded_geojson:
             folium.GeoJson(
                 uploaded_geojson,
-                style_function=lambda x: {'fillColor': '#ff0000', 'color': '#ff0000', 'weight': 2, 'fillOpacity': 0.4}
+                style_function=lambda x: {'fillColor': 'transparent', 'color': '#ff0000', 'weight': 2, 'fillOpacity': 0}
             ).add_to(m)
             
         Draw(export=True, position='topleft', draw_options={
