@@ -12,7 +12,7 @@ import os
 import tempfile
 from branca.element import Element
 from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderTimedOut
+from geopy.exc import GeocoderTimedOut, GeocoderServiceError
 
 # -----------------------------------------------------------------------------
 # 系統設定
@@ -34,8 +34,8 @@ FORMULAS = [
     {"name": "Martin et al. (2002)", "formula": "V = 1.0359 * A^0.88", "a": 1.0359, "b": 0.88}
 ]
 
-# 台灣縣市與鄉鎮市區連動清單 (已精細到鄉鎮層級)
 TW_DISTRICTS = {
+    "請選擇縣市...": ["請先選擇縣市"],
     "台北市": ["中正區", "大同區", "中山區", "松山區", "大安區", "萬華區", "信義區", "士林區", "北投區", "內湖區", "南港區", "文山區"],
     "新北市": ["萬里區", "金山區", "板橋區", "汐止區", "深坑區", "石碇區", "瑞芳區", "平溪區", "雙溪區", "貢寮區", "新店區", "坪林區", "烏來區", "永和區", "中和區", "土城區", "三峽區", "樹林區", "鶯歌區", "三重區", "新莊區", "泰山區", "林口區", "蘆洲區", "五股區", "八里區", "淡水區", "三芝區", "石門區"],
     "桃園市": ["中壢區", "平鎮區", "龍潭區", "楊梅區", "新屋區", "觀音區", "桃園區", "龜山區", "八德區", "大溪區", "復興區", "大園區"],
@@ -116,7 +116,7 @@ def process_spatial_file(uploaded_file):
         else:
             return None, 0, None
 
-        # 🚀 處理 TWD97 (已移除所有警告標語，在後台默默轉換)
+        # 🚀 靜默處理 TWD97，無警告標語
         if gdf.crs is None:
             minx, miny, maxx, maxy = gdf.total_bounds
             if minx > 180:
@@ -174,6 +174,19 @@ def inject_folium_draw_fix(m):
     """
     m.get_root().header.add_child(Element(css_injection))
 
+# -----------------------------------------------------------------------------
+# 模組化：安全執行 Geocoding，防止 API 崩潰
+# -----------------------------------------------------------------------------
+def safe_geocode(query):
+    try:
+        geolocator = Nominatim(user_agent="landslide_geo_app_tw")
+        location = geolocator.geocode(query, timeout=3)
+        return location
+    except (GeocoderTimedOut, GeocoderServiceError):
+        # 發生錯誤時默默吞下，不報紅字
+        return None
+    except Exception:
+        return None
 
 # -----------------------------------------------------------------------------
 # 主功能切換 Tabs
@@ -200,7 +213,6 @@ with tab2:
     
     col_map, col_controls = st.columns([3, 1])
     
-    # 預設變數 (預設地圖中心點)
     map_center = [23.9782, 121.1332]
     map_zoom = 8
     fit_bounds_coords = None
@@ -211,44 +223,32 @@ with tab2:
         st.write("### ⚙️ 操作面板")
         st.markdown("---")
         
-        # 🚀 功能 1：縣市與鄉鎮市區連動下拉選單
+        # 🚀 功能 1：強制並列的連動下拉選單
         st.write("📍 **1. 快速定位鄉鎮市區**")
-        city_options = ["請選擇縣市..."] + list(TW_DISTRICTS.keys())
-        selected_city = st.selectbox("選擇縣市：", city_options)
+        city_options = list(TW_DISTRICTS.keys())
+        selected_city = st.selectbox("選擇縣市：", city_options, key="city_selector")
         
-        if selected_city != "請選擇縣市...":
-            district_options = ["請選擇鄉鎮市區..."] + TW_DISTRICTS[selected_city]
-            selected_district = st.selectbox("選擇鄉鎮市區：", district_options)
-            
-            # 當使用者選定了明確的鄉鎮市區，才啟動 Geocoding 搜尋以取得座標
-            if selected_district != "請選擇鄉鎮市區...":
-                search_target = f"台灣 {selected_city} {selected_district}"
-                try:
-                    geolocator = Nominatim(user_agent="landslide_app")
-                    location = geolocator.geocode(search_target, timeout=5)
-                    if location:
-                        map_center = [location.latitude, location.longitude]
-                        map_zoom = 13 # 鄉鎮層級的適當縮放
-                        st.success(f"已精確定位：{selected_city}{selected_district}")
-                except Exception:
-                    pass
+        # 無論是否選擇，第二層選單永遠存在於 UI 上
+        district_options = TW_DISTRICTS[selected_city]
+        selected_district = st.selectbox("選擇鄉鎮市區：", district_options, key="district_selector")
+        
+        # 只有當選定鄉鎮後，才執行定位
+        if selected_city != "請選擇縣市..." and selected_district != "請先選擇縣市":
+            search_target = f"台灣 {selected_city} {selected_district}"
+            location = safe_geocode(search_target)
+            if location:
+                map_center = [location.latitude, location.longitude]
+                map_zoom = 13
+                st.success(f"已精確定位：{selected_city}{selected_district}")
 
         # 功能 2：精確文字搜尋 (選用)
         st.write("🔍 **2. 進階地名/地址搜尋**")
         search_query = st.text_input("輸入詳細地址或地標", placeholder="例如：阿里山鄉...")
         if search_query:
-            try:
-                geolocator = Nominatim(user_agent="landslide_app")
-                location = geolocator.geocode(search_query, timeout=5)
-                if location:
-                    map_center = [location.latitude, location.longitude]
-                    map_zoom = 15
-                else:
-                    st.warning("找不到該地區")
-            except GeocoderTimedOut:
-                st.error("搜尋服務超時")
-            except Exception:
-                pass
+            location = safe_geocode(search_query)
+            if location:
+                map_center = [location.latitude, location.longitude]
+                map_zoom = 15
         
         st.markdown("---")
         
