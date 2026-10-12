@@ -304,13 +304,15 @@ with tab2:
         map_data = st_folium(m, width="100%", height=650, key="folium_map_satellite")
     
     # -------------------------------------------------------------------------
-    # 🚀 全新功能：收集所有有效面積，讓使用者自行選擇計算目標
+    # 🚀 優化：收集所有有效面積，並在選項名稱上直接標註「面積大小」以利辨識！
     # -------------------------------------------------------------------------
     available_areas = {}
     
     # 1. 抓取上傳檔案的面積
     if spatial_file and uploaded_area > 0:
-        available_areas["上傳的空間圖層範圍"] = uploaded_area
+        # 直接把面積寫在標題裡，一目了然
+        option_name = f"📂 上傳的空間圖層 (約 {uploaded_area:,.0f} m²)"
+        available_areas[option_name] = uploaded_area
         
     # 2. 抓取地圖上手動圈繪的所有面積
     if map_data and map_data.get("all_drawings"):
@@ -319,20 +321,23 @@ with tab2:
                 geom = shape(drawing["geometry"])
                 geod = Geod(ellps="WGS84")
                 area, _ = geod.geometry_area_perimeter(geom)
-                available_areas[f"手動圈繪範圍 - 多邊形 {i+1}"] = abs(area)
+                abs_area = abs(area)
+                
+                # 直接把面積寫在標題裡，畫了幾個都不怕忘記！
+                option_name = f"🖍️ 手動圈繪 - 多邊形 {i+1} (約 {abs_area:,.0f} m²)"
+                available_areas[option_name] = abs_area
     
-    # 3. 如果有找到任何面積，顯示選擇器並進行計算
+    # 3. 顯示選擇器並進行計算
     if available_areas:
         st.markdown("---")
         st.markdown("### 🧮 選擇計算目標")
-        st.write("系統偵測到畫面中包含多個範圍，請選擇您要依據哪一個範圍來推估量體：")
+        st.write("系統偵測到畫面中包含多個範圍，請透過**面積大小**判斷並選擇您要計算的目標：")
         
         options = list(available_areas.keys())
-        # 預設選擇陣列中最後一個選項（也就是最新畫的，或是剛上傳的）
         default_index = len(options) - 1 
         
-        selected_source = st.radio("範圍清單", options, index=default_index, horizontal=True, label_visibility="collapsed")
+        # 由於選項變長了，取消 horizontal 讓它垂直排列比較好讀
+        selected_source = st.radio("選擇目標", options, index=default_index, label_visibility="collapsed")
         
-        # 取得被選中的面積，交給下方渲染結果
         final_area = available_areas[selected_source]
         render_results(final_area)
