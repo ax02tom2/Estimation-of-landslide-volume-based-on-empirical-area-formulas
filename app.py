@@ -169,4 +169,146 @@ with tab2:
         
         # ⚠️ 終極暴力解法 ⚠️
         # 注入原生的 JavaScript，直接改寫 Leaflet 底層引擎的預設 Icon 參數！
-        # 把原本的 L.Point(8, 8) 強制
+        # 把原本的 L.Point(8, 8) 強制改成 L.Point(2, 2)
+        js_injection = """
+        <script>
+            document.addEventListener("DOMContentLoaded", function() {
+                setTimeout(function() {
+                    if (typeof L !== 'undefined' && L.Edit && L.Edit.PolyVerticesEdit) {
+                        L.Edit.PolyVerticesEdit.prototype.options.icon = new L.DivIcon({
+                            iconSize: new L.Point(2, 2),
+                            className: 'leaflet-div-icon leaflet-editing-icon'
+                        });
+                        L.Edit.PolyVerticesEdit.prototype.options.touchIcon = new L.DivIcon({
+                            iconSize: new L.Point(2, 2),
+                            className: 'leaflet-div-icon leaflet-editing-icon leaflet-touch-icon'
+                        });
+                        console.log("Leaflet nodes successfully shrunk via JS hack!");
+                    }
+                }, 1000);
+            });
+        </script>
+        """
+        m.get_root().html.add_child(Element(js_injection))
+        
+        # 為了保險起見，CSS 也加上，且設定為透明度 0.5 降低干擾
+        css_injection = """
+        <style>
+        .leaflet-div-icon.leaflet-editing-icon {
+            width: 2px !important;
+            height: 2px !important;
+            margin-left: -1px !important;
+            margin-top: -1px !important;
+            border-radius: 50% !important;
+            background-color: #ff0000 !important;
+            border: none !important;
+            opacity: 0.7 !important;
+        }
+        .leaflet-draw-tooltip {
+            display: none !important;
+        }
+        </style>
+        """
+        m.get_root().header.add_child(Element(css_injection))
+
+        folium.TileLayer(
+            tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+            attr='Google',
+            name='Google Satellite',
+            overlay=False,
+            control=True
+        ).add_to(m)
+        
+        if uploaded_geojson:
+            folium.GeoJson(
+                uploaded_geojson,
+                style_function=lambda x: {'fillColor': '#ff0000', 'color': '#ff0000', 'weight': 2, 'fillOpacity': 0.4}
+            ).add_to(m)
+            
+        Draw(export=True, position='topleft', draw_options={
+            'polyline': False, 'rectangle': False, 'circle': False, 
+            'circlemarker': False, 'marker': False, 
+            'polygon': {'allowIntersection': False}
+        }).add_to(m)
+        
+        map_data = st_folium(m, width="100%", height=500, key="folium_map")
+    
+    final_area = 0
+    if map_data and map_data.get("all_drawings") and len(map_data["all_drawings"]) > 0:
+        latest_drawing = map_data["all_drawings"][-1]
+        if latest_drawing["geometry"]["type"] == "Polygon":
+            geom = shape(latest_drawing["geometry"])
+            geod = Geod(ellps="WGS84")
+            area, _ = geod.geometry_area_perimeter(geom)
+            final_area = abs(area)
+            st.success("✅ 已套用手動圈繪範圍面積。")
+    elif spatial_file and uploaded_area > 0:
+        final_area = uploaded_area
+        
+    if final_area > 0:
+         render_results(final_area)
+
+
+# ====== Tab 3: 自訂影像上傳 (離線/最新) ======
+with tab3:
+    st.subheader("上傳最新空拍或正射影像")
+    
+    st.error("⚠️ **繪圖操作注意：請務必點擊【滑鼠右鍵】才能將範圍閉合！**")
+    
+    # 初始化 Session State
+    if 'processed_image' not in st.session_state:
+        st.session_state.processed_image = None
+        st.session_state.img_width = 800
+        st.session_state.img_height = 600
+
+    uploaded_img = st.file_uploader("選擇影像檔案", type=["jpg", "jpeg", "png", "tif", "tiff", "bmp"], key="file_uploader")
+    
+    if uploaded_img:
+        try:
+            # 只有在新檔案上傳時才處理
+            if st.session_state.processed_image is None or uploaded_img.name != st.session_state.get('last_uploaded_name', ''):
+                img = Image.open(uploaded_img).convert("RGB")
+                img.thumbnail((800, 800)) 
+                
+                st.session_state.processed_image = img
+                st.session_state.img_width = img.width
+                st.session_state.img_height = img.height
+                st.session_state.last_uploaded_name = uploaded_img.name
+                
+                st.success(f"✅ 影像安全載入 ({img.width} x {img.height} 像素)。")
+                
+        except Exception as e:
+            st.error(f"⚠️ 影像處理錯誤: {str(e)}")
+
+    if st.session_state.processed_image is not None:
+        
+        # 節點大小直接受到 point_display_radius 參數控制，這裡設為 1 (最小)
+        canvas_result = st_canvas(
+            fill_color="rgba(255, 165, 0, 0.4)", 
+            stroke_width=2,
+            stroke_color="#ff0000",
+            background_image=st.session_state.processed_image, 
+            update_streamlit=True,
+            height=st.session_state.img_height,
+            width=st.session_state.img_width,
+            drawing_mode="polygon",
+            point_display_radius=1, # 強制最小化圈繪節點
+            key="canvas_image_safe",
+        )
+        
+        if canvas_result.json_data is not None:
+            objects = canvas_result.json_data["objects"]
+            if objects:
+                for obj in objects:
+                    if obj["type"] == "path":
+                        points = []
+                        for cmd in obj["path"]:
+                            if cmd[0] in ['M', 'L'] and len(cmd) >= 3:
+                                points.append((cmd[1], cmd[2]))
+                        
+                        if len(points) >= 3:
+                            poly = Polygon(points)
+                            px_area = poly.area
+                            render_results(px_area)
+                            st.info("ℹ️ 註：影像無空間座標，目前計算結果為「像素面積 (Pixels²)」，請視需求自行換算。")
+                            break
