@@ -11,6 +11,8 @@ import geopandas as gpd
 import json
 import zipfile
 import io
+import os
+import tempfile
 
 # -----------------------------------------------------------------------------
 # 系統設定與記憶偏好套用 (卡片式排版、防護機制)
@@ -18,7 +20,7 @@ import io
 st.set_page_config(page_title="崩塌量體推估系統", layout="wide")
 
 st.title("⛰️ 崩塌量體推估系統 (面積經驗公式對照)")
-st.markdown("本系統整合多組實證經驗公式，支援**手動輸入**、**線上衛星底圖圈繪(含KML/GeoJSON上傳)**及**自訂空拍影像上傳**，快速推估崩塌量體 (V) 與平均滑動深度 (D)。")
+st.markdown("本系統整合多組實證經驗公式，支援**手動輸入**、**線上衛星底圖圈繪(含Shapefile/KML上傳)**及**自訂空拍影像上傳**，快速推估崩塌量體 (V) 與平均滑動深度 (D)。")
 
 # -----------------------------------------------------------------------------
 # 經驗公式定義
@@ -62,201 +64,35 @@ def render_results(area_m2):
                 """, unsafe_allow_html=True)
 
 def process_spatial_file(uploaded_file):
-    """處理上傳的空間檔案，回傳 GeoJSON 格式與面積"""
+    """處理上傳的空間檔案，支援 ZIP(Shapefile), KML, KMZ, GeoJSON，回傳 GeoJSON 格式與面積"""
     try:
         # GeoPandas 需處理 KML
         gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
         
         file_ext = uploaded_file.name.split('.')[-1].lower()
+        gdf = None
         
         if file_ext == 'geojson':
             gdf = gpd.read_file(uploaded_file)
+            
         elif file_ext == 'kml':
             gdf = gpd.read_file(uploaded_file, driver='KML')
+            
         elif file_ext == 'kmz':
             with zipfile.ZipFile(uploaded_file, 'r') as kmz:
                 kml_filename = [f for f in kmz.namelist() if f.endswith('.kml')][0]
                 with kmz.open(kml_filename, 'r') as kml_file:
                     gdf = gpd.read_file(kml_file, driver='KML')
-        else:
-            st.error("不支援的檔案格式")
-            return None, 0
-
-        # 計算 WGS84 真實面積
-        geod = Geod(ellps="WGS84")
-        total_area = 0
-        for geom in gdf.geometry:
-            if geom.type == 'Polygon' or geom.type == 'MultiPolygon':
-                area, _ = geod.geometry_area_perimeter(geom)
-                total_area += abs(area)
+                    
+        elif file_ext == 'zip':
+            # 處理 Shapefile (包裝在 ZIP 內)
+            # 建立暫存資料夾解壓縮，因為 geopandas 直接讀 zip 有時會因路徑編碼出錯
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with zipfile.ZipFile(uploaded_file, 'r') as zip_ref:
+                    zip_ref.extractall(tmpdir)
                 
-        return json.loads(gdf.to_json()), total_area
-    except Exception as e:
-        # 遵循 Gemini Python 規範：印出完整錯誤
-        st.error(f"檔案解析失敗: {str(e)}")
-        return None, 0
-
-# -----------------------------------------------------------------------------
-# 主功能切換 Tabs
-# -----------------------------------------------------------------------------
-tab1, tab2, tab3 = st.tabs(["🔢 1. 數值直接輸入", "🗺️ 2. 衛星底圖圈繪 (線上/檔案上傳)", "🖼️ 3. 自訂影像上傳 (離線/最新)"])
-
-# ====== Tab 1: 數值直接輸入 ======
-with tab1:
-    st.subheader("手動輸入面積 (自動換算單位)")
-    col_input, col_unit = st.columns([2, 1])
-    with col_input:
-        input_area = st.number_input("輸入面積數值", min_value=0.0, value=0.0, step=0.1)
-    with col_unit:
-        unit_choice = st.selectbox("選擇輸入單位", ["平方公尺 (m²)", "公頃 (ha)", "平方公里 (km²)"])
-    
-    if unit_choice == "公頃 (ha)":
-        base_area_m2 = input_area * 10000
-    elif unit_choice == "平方公里 (km²)":
-        base_area_m2 = input_area * 1000000
-    else:
-        base_area_m2 = input_area
-        
-    if base_area_m2 > 0:
-        render_results(base_area_m2)
-
-# ====== Tab 2: 衛星底圖圈繪 (含檔案上傳) ======
-with tab2:
-    st.subheader("在地圖上圈繪或上傳崩塌範圍 (KML/KMZ/GeoJSON)")
-    st.info("💡 說明：您可直接使用左側工具列圈繪，或上傳既有的空間範圍檔案，系統將自動定位並計算。")
-    
-    col_map, col_upload = st.columns([3, 1])
-    
-    with col_upload:
-        st.write("📂 **上傳空間範圍檔**")
-        spatial_file = st.file_uploader("支援 KML, KMZ, GeoJSON", type=['kml', 'kmz', 'geojson'])
-    
-    # 預設中心點
-    map_center = [23.6978, 120.9605]
-    map_zoom = 7
-    uploaded_geojson = None
-    uploaded_area = 0
-
-    if spatial_file:
-        uploaded_geojson, uploaded_area = process_spatial_file(spatial_file)
-        if uploaded_geojson:
-            # 計算中心點以自動平移
-            try:
-                coords = uploaded_geojson['features'][0]['geometry']['coordinates'][0][0]
-                map_center = [coords[1], coords[0]]
-                map_zoom = 15
-            except:
-                pass
-
-    with col_map:
-        m = folium.Map(location=map_center, zoom_start=map_zoom) 
-        
-        # 加入免費的 Google 衛星影像作為底圖
-        folium.TileLayer(
-            tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-            attr='Google',
-            name='Google Satellite',
-            overlay=False,
-            control=True
-        ).add_to(m)
-        
-        # 如果有上傳檔案，將其加入地圖
-        if uploaded_geojson:
-            folium.GeoJson(
-                uploaded_geojson,
-                style_function=lambda x: {'fillColor': '#ff0000', 'color': '#ff0000', 'weight': 2, 'fillOpacity': 0.4}
-            ).add_to(m)
-            
-        # 限制只能畫多邊形
-        Draw(export=True, position='topleft', draw_options={
-            'polyline': False, 'rectangle': False, 'circle': False, 
-            'circlemarker': False, 'marker': False, 
-            'polygon': {'allowIntersection': False}
-        }).add_to(m)
-        
-        map_data = st_folium(m, width="100%", height=500, key="folium_map")
-    
-    # 計算面積邏輯：手動圈繪優先 > 上傳檔案
-    final_area = 0
-    if map_data and map_data.get("all_drawings") and len(map_data["all_drawings"]) > 0:
-        # 計算最後一次手動畫的面積
-        latest_drawing = map_data["all_drawings"][-1]
-        if latest_drawing["geometry"]["type"] == "Polygon":
-            geom = shape(latest_drawing["geometry"])
-            geod = Geod(ellps="WGS84")
-            area, _ = geod.geometry_area_perimeter(geom)
-            final_area = abs(area)
-            st.success("✅ 已套用手動圈繪範圍面積。")
-    elif spatial_file and uploaded_area > 0:
-        final_area = uploaded_area
-        st.success(f"✅ 已套用上傳檔案之範圍面積。")
-        
-    if final_area > 0:
-         render_results(final_area)
-
-
-# ====== Tab 3: 自訂影像上傳 (離線/最新) ======
-with tab3:
-    st.subheader("上傳最新空拍或正射影像 (解決底圖過舊問題)")
-    st.info("💡 說明：支援多種常見影像格式。為不遮擋圖面，圈繪點已設定為微小節點。")
-    
-    # 擴充影像支援格式
-    uploaded_img = st.file_uploader("選擇影像檔案", type=["jpg", "jpeg", "png", "tif", "tiff", "bmp"])
-    
-    if uploaded_img:
-        # 應用記憶偏好：嚴格容量攔截鎖 (防止 Cloud 記憶體溢出)
-        if uploaded_img.size > 20 * 1024 * 1024:
-            st.error("❌ 檔案過大！為防止雲端主機 OOM 崩潰，請上傳小於 20MB 的圖片。")
-            st.stop()
-            
-        try:
-            img = Image.open(uploaded_img)
-            
-            # 應用記憶偏好：啟用輕量化縮圖機制
-            img.thumbnail((1200, 1200))
-            st.success(f"✅ 影像安全載入！已自動優化解析度適應螢幕 ({img.width} x {img.height} 像素)。")
-            
-            col_scale1, col_scale2 = st.columns(2)
-            with col_scale1:
-                px_per_unit = st.number_input("校正比例尺：影像中「100 像素」約等於多少公尺 (m)？", min_value=0.1, value=10.0, step=1.0)
-                meters_per_pixel = px_per_unit / 100.0
-            with col_scale2:
-                st.write("") 
-                st.write(f"👉 系統當前換算率: **1 像素 = {meters_per_pixel:.3f} 公尺**")
-            
-            st.markdown("請在下方影像上**點擊滑鼠左鍵**圈繪範圍（雙擊完成閉合）：")
-            
-            # 使用 Drawable Canvas 進行影像上方畫圖，縮小節點半徑以利閱讀
-            canvas_result = st_canvas(
-                fill_color="rgba(255, 165, 0, 0.4)", 
-                stroke_width=2,
-                stroke_color="#ff0000",
-                background_image=img,
-                update_streamlit=True,
-                height=img.height,
-                width=img.width,
-                drawing_mode="polygon",
-                point_display_radius=2, # 強制縮小圈繪點的大小 (原預設通常較大)
-                key="canvas_image",
-            )
-            
-            if canvas_result.json_data is not None:
-                objects = canvas_result.json_data["objects"]
-                if objects:
-                    for obj in objects:
-                        if obj["type"] == "path":
-                            points = []
-                            for cmd in obj["path"]:
-                                if cmd[0] in ['M', 'L'] and len(cmd) >= 3:
-                                    points.append((cmd[1], cmd[2]))
-                            
-                            if len(points) >= 3:
-                                poly = Polygon(points)
-                                px_area = poly.area
-                                real_area = px_area * (meters_per_pixel ** 2)
-                                render_results(real_area)
-                                break 
-                                
-        except Exception as e:
-            # 應用記憶偏好：Gemini 除錯鐵律
-            st.error(f"⚠️ 影像處理或計算時發生錯誤: {str(e)}")
+                # 尋找 .shp 檔案
+                shp_files = [f for f in os.listdir(tmpdir) if f.endswith('.shp')]
+                if not shp_files:
+                    st.error("ZIP 壓縮檔內找不到 .shp 檔案！")
+                    return None,
