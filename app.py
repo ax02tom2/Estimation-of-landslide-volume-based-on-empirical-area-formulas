@@ -17,9 +17,9 @@ from geopy.exc import GeocoderTimedOut, GeocoderServiceError
 # -----------------------------------------------------------------------------
 # 系統設定
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="崩塌量體推估系統", page_icon="📐", layout="wide")
+st.set_page_config(page_title="崩塌量體推估系統", page_icon="🗺️", layout="wide")
 
-st.title("📐 崩塌量體推估系統 (面積經驗公式對照)")
+st.title("⛰️ 崩塌量體推估系統 (面積經驗公式對照)")
 st.markdown("本系統整合多組實證經驗公式，支援**手動輸入**及**線上衛星底圖/空間檔案上傳**，快速推估崩塌量體 (V) 與平均滑動深度 (D)。")
 
 # -----------------------------------------------------------------------------
@@ -116,7 +116,6 @@ def process_spatial_file(uploaded_file):
         else:
             return None, 0, None
 
-        # 無聲的 TWD97 轉換
         if gdf.crs is None:
             minx, miny, maxx, maxy = gdf.total_bounds
             if minx > 180:
@@ -262,8 +261,7 @@ with tab2:
             
         inject_folium_draw_fix(m) 
         
-        # 🆕 加入多種底圖選擇 (解決時序未知問題)
-        # 1. Google 衛星影像
+        # 多種底圖選擇
         folium.TileLayer(
             tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
             attr='Google',
@@ -272,7 +270,6 @@ with tab2:
             control=True
         ).add_to(m)
 
-        # 2. 國土測繪中心 NLSC 正射影像 (台灣官方近期圖資)
         folium.TileLayer(
             tiles='https://wmts.nlsc.gov.tw/wmts/PHOTO2/default/GoogleMapsCompatible/{z}/{y}/{x}',
             attr='NLSC',
@@ -281,7 +278,6 @@ with tab2:
             control=True
         ).add_to(m)
 
-        # 3. ESRI 衛星影像 (作為另一個時間切片的交叉比對)
         folium.TileLayer(
             tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
             attr='Esri',
@@ -290,7 +286,6 @@ with tab2:
             control=True
         ).add_to(m)
         
-        # 上傳圖層樣式：透明底色留紅框
         if uploaded_geojson:
             folium.GeoJson(
                 uploaded_geojson,
@@ -304,24 +299,40 @@ with tab2:
             'polygon': {'allowIntersection': False}
         }).add_to(m)
         
-        # 🆕 啟用右上角圖層控制開關
         folium.LayerControl(position='topright').add_to(m)
         
         map_data = st_folium(m, width="100%", height=650, key="folium_map_satellite")
     
-    final_area = 0
-    if map_data and map_data.get("all_drawings") and len(map_data["all_drawings"]) > 0:
-        latest_drawing = map_data["all_drawings"][-1]
-        if latest_drawing["geometry"]["type"] == "Polygon":
-            geom = shape(latest_drawing["geometry"])
-            geod = Geod(ellps="WGS84")
-            area, _ = geod.geometry_area_perimeter(geom)
-            final_area = abs(area)
-            st.success("✅ 已套用手動圈繪範圍面積。")
-            
-    elif spatial_file and uploaded_area > 0:
-        final_area = uploaded_area
-        st.success("✅ 已套用上傳圖層面積。")
+    # -------------------------------------------------------------------------
+    # 🚀 全新功能：收集所有有效面積，讓使用者自行選擇計算目標
+    # -------------------------------------------------------------------------
+    available_areas = {}
+    
+    # 1. 抓取上傳檔案的面積
+    if spatial_file and uploaded_area > 0:
+        available_areas["上傳的空間圖層範圍"] = uploaded_area
         
-    if final_area > 0:
-         render_results(final_area)
+    # 2. 抓取地圖上手動圈繪的所有面積
+    if map_data and map_data.get("all_drawings"):
+        for i, drawing in enumerate(map_data["all_drawings"]):
+            if drawing["geometry"]["type"] == "Polygon":
+                geom = shape(drawing["geometry"])
+                geod = Geod(ellps="WGS84")
+                area, _ = geod.geometry_area_perimeter(geom)
+                available_areas[f"手動圈繪範圍 - 多邊形 {i+1}"] = abs(area)
+    
+    # 3. 如果有找到任何面積，顯示選擇器並進行計算
+    if available_areas:
+        st.markdown("---")
+        st.markdown("### 🧮 選擇計算目標")
+        st.write("系統偵測到畫面中包含多個範圍，請選擇您要依據哪一個範圍來推估量體：")
+        
+        options = list(available_areas.keys())
+        # 預設選擇陣列中最後一個選項（也就是最新畫的，或是剛上傳的）
+        default_index = len(options) - 1 
+        
+        selected_source = st.radio("範圍清單", options, index=default_index, horizontal=True, label_visibility="collapsed")
+        
+        # 取得被選中的面積，交給下方渲染結果
+        final_area = available_areas[selected_source]
+        render_results(final_area)
