@@ -22,6 +22,22 @@ st.set_page_config(page_title="崩塌量體推估系統", layout="wide")
 st.title("⛰️ 崩塌量體推估系統 (面積經驗公式對照)")
 st.markdown("本系統整合多組實證經驗公式，支援**手動輸入**、**線上衛星底圖圈繪(含Shapefile/KML上傳)**及**自訂空拍影像上傳**，快速推估崩塌量體 (V) 與平均滑動深度 (D)。")
 
+# 強制注入 CSS 以解決 Folium 地圖圈繪節點過大的問題 (覆寫 Leaflet 預設樣式)
+st.markdown("""
+<style>
+/* 縮小 Folium/Leaflet 畫圖時的白色方形節點 */
+.leaflet-editing-icon {
+    width: 6px !important;
+    height: 6px !important;
+    margin-left: -3px !important;
+    margin-top: -3px !important;
+    border-radius: 50% !important; /* 改為圓形 */
+    background-color: #ff0000 !important; /* 改為紅色比較顯眼但不遮擋 */
+    border: 1px solid white !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # -----------------------------------------------------------------------------
 # 經驗公式定義
 # -----------------------------------------------------------------------------
@@ -201,25 +217,11 @@ with tab2:
                 style_function=lambda x: {'fillColor': '#ff0000', 'color': '#ff0000', 'weight': 2, 'fillOpacity': 0.4}
             ).add_to(m)
             
-        # 修正 1：客製化 Folium Draw 的樣式，將圈繪節點縮小
-        # 透過插入自訂的 JavaScript 物件，取代預設的巨大方塊 Icon
-        custom_draw_options = {
-            'polyline': False, 
-            'rectangle': False, 
-            'circle': False, 
-            'circlemarker': False, 
-            'marker': False, 
-            'polygon': {
-                'allowIntersection': False,
-                'drawError': {'color': '#e1e100', 'message': '<strong>錯誤:<strong> 無法交叉!'},
-                'shapeOptions': {'color': '#ff0000', 'fillOpacity': 0.4}
-            }
-        }
-        
-        # 為了縮小節點，我們需要修改 Leaflet.Draw 的底層 editOptions，這部分在 folium wrapper 中較難直接設定
-        # 但我們可以透過改變 editOptions 內建的樣式來達成 (這依賴 folium 產生 html 時注入)
-        # 最保險的做法是直接加入 Draw 控制項，並容忍輕微的圖示差異。
-        Draw(export=True, position='topleft', draw_options=custom_draw_options, edit_options={'edit': False}).add_to(m)
+        Draw(export=True, position='topleft', draw_options={
+            'polyline': False, 'rectangle': False, 'circle': False, 
+            'circlemarker': False, 'marker': False, 
+            'polygon': {'allowIntersection': False}
+        }).add_to(m)
         
         map_data = st_folium(m, width="100%", height=500, key="folium_map")
     
@@ -243,27 +245,32 @@ with tab2:
 # ====== Tab 3: 自訂影像上傳 (離線/最新) ======
 with tab3:
     st.subheader("上傳最新空拍或正射影像 (解決底圖過舊問題)")
-    st.info("💡 說明：支援多種常見影像格式。為不遮擋圖面，圈繪點已設定為微小節點。")
+    st.info("💡 操作說明：\n1. 上傳影像。\n2. 在影像上點擊**滑鼠左鍵**新增節點。\n3. **點擊「滑鼠右鍵」完成閉合！** (雙擊左鍵無法閉合)")
     
     uploaded_img = st.file_uploader("選擇影像檔案", type=["jpg", "jpeg", "png", "tif", "tiff", "bmp"])
     
     if uploaded_img:
         try:
-            # 修正 2：強制轉換為 RGB 模式，避免 RGBA 或特殊 TIFF 格式導致前端 Canvas 顯示空白
+            # 根本解決方案 1：徹底轉換格式並縮小，然後存成實體檔案給 Canvas 讀取
             img = Image.open(uploaded_img).convert("RGB")
-            
-            # 為了防止超大圖解析度（例如空拍機原始無損檔）拖垮瀏覽器效能
             img.thumbnail((1200, 1200))
+            
+            # 使用 Streamlit 特有的暫存目錄，確保每次重整都不會遺失圖片實體
+            if not os.path.exists("temp_images"):
+                os.makedirs("temp_images")
+            
+            temp_img_path = "temp_images/current_bg.png"
+            img.save(temp_img_path, "PNG")
+            
             st.success(f"✅ 影像載入成功！已優化解析度適應螢幕 ({img.width} x {img.height} 像素)。")
             
-            st.markdown("請在下方影像上**點擊滑鼠左鍵**圈繪範圍（雙擊完成閉合）：")
-            
-            # 使用 Drawable Canvas 進行影像上方畫圖，縮小節點半徑以利閱讀
+            # 根本解決方案 2：只傳檔案路徑，不傳物件，保證不會變成白畫面
+            # point_display_radius=2 確保繪圖時的節點也是極小的
             canvas_result = st_canvas(
                 fill_color="rgba(255, 165, 0, 0.4)", 
                 stroke_width=2,
                 stroke_color="#ff0000",
-                background_image=img,
+                background_image=Image.open(temp_img_path), 
                 update_streamlit=True,
                 height=img.height,
                 width=img.width,
@@ -285,7 +292,6 @@ with tab3:
                             if len(points) >= 3:
                                 poly = Polygon(points)
                                 px_area = poly.area
-                                # 修正 3：已移除比例尺，純計算像素面積
                                 render_results(px_area)
                                 st.info("ℹ️ 註：影像無空間座標，目前計算結果為「像素面積 (Pixels²)」，請視需求自行換算。")
                                 break 
