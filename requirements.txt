@@ -1,0 +1,8 @@
+streamlit
+pandas
+Pillow
+folium
+streamlit-folium
+shapely
+pyproj
+streamlit-drawable-canvas
