@@ -208,7 +208,7 @@ with tab1:
 
 with tab2:
     st.subheader("在地圖上圈繪或上傳崩塌範圍")
-    st.info("💡 說明：地圖右上角可切換不同來源(年份)圖資。畫完圖形後，系統會在圖形中央自動標註名稱以利辨識。")
+    st.info("💡 說明：地圖右上角可切換不同來源(年份)的衛星圖資比對。畫完圖形後，系統會在圖形中央自動標註名稱以利辨識。")
     
     col_map, col_controls = st.columns([3, 1])
     
@@ -297,12 +297,12 @@ with tab2:
                 style_function=lambda x: {'fillColor': 'transparent', 'color': '#ff0000', 'weight': 2, 'fillOpacity': 0}
             ).add_to(m)
             
-        # 🚀 在地圖上動態加入多邊形名稱標籤 (黃色粗體字)
+        # 🚀 修正錯誤：將 className 改為正確的 class_name
         for info in st.session_state.drawn_polygons_info:
             folium.Marker(
                 location=info["centroid"],
                 icon=folium.DivIcon(
-                    className="dummy", # 消除預設白色方塊背景
+                    class_name="dummy", # 這裡修正了！
                     html=f"""
                         <div style="
                             font-size: 16px; 
@@ -332,7 +332,7 @@ with tab2:
     # 🚀 面積收集、動態標籤生成與 UI 選單聯動
     # -------------------------------------------------------------------------
     available_areas = {}
-    current_polygons_info = [] # 用來與 session_state 比對
+    current_polygons_info = [] 
     
     # 1. 上傳檔案的面積
     if spatial_file and uploaded_area > 0:
@@ -361,7 +361,6 @@ with tab2:
                 available_areas[option_name] = abs_area
     
     # 🌟 核心邏輯：如果使用者剛畫完一個圖形，這裡的數量/中心點會與記憶體不同
-    # 此時我們更新記憶體，並呼叫 st.rerun() 讓地圖立刻掛上黃色標籤！
     if current_polygons_info != st.session_state.drawn_polygons_info:
         st.session_state.drawn_polygons_info = current_polygons_info
         st.rerun()
