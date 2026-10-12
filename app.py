@@ -116,6 +116,7 @@ def process_spatial_file(uploaded_file):
         else:
             return None, 0, None
 
+        # 無聲的 TWD97 轉換
         if gdf.crs is None:
             minx, miny, maxx, maxy = gdf.total_bounds
             if minx > 180:
@@ -204,7 +205,7 @@ with tab1:
 
 with tab2:
     st.subheader("在地圖上圈繪或上傳崩塌範圍")
-    st.info("💡 說明：左側地圖可直接點擊圈繪。右側選單可快速定位，或上傳 Shapefile(需打包為ZIP)/KML 檔案。")
+    st.info("💡 說明：左側地圖可直接點擊圈繪。地圖右上角可切換不同來源(年份)的衛星圖資比對。")
     
     col_map, col_controls = st.columns([3, 1])
     
@@ -261,18 +262,39 @@ with tab2:
             
         inject_folium_draw_fix(m) 
         
+        # 🆕 加入多種底圖選擇 (解決時序未知問題)
+        # 1. Google 衛星影像
         folium.TileLayer(
             tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
             attr='Google',
-            name='Google Satellite',
+            name='Google 衛星影像 (預設/近期)',
+            overlay=False,
+            control=True
+        ).add_to(m)
+
+        # 2. 國土測繪中心 NLSC 正射影像 (台灣官方近期圖資)
+        folium.TileLayer(
+            tiles='https://wmts.nlsc.gov.tw/wmts/PHOTO2/default/GoogleMapsCompatible/{z}/{y}/{x}',
+            attr='NLSC',
+            name='NLSC 國土測繪中心-正射影像',
+            overlay=False,
+            control=True
+        ).add_to(m)
+
+        # 3. ESRI 衛星影像 (作為另一個時間切片的交叉比對)
+        folium.TileLayer(
+            tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+            attr='Esri',
+            name='ESRI World Imagery',
             overlay=False,
             control=True
         ).add_to(m)
         
-        # 修改上傳圖層顯示樣式：無底色 (fillOpacity: 0)，保留紅框
+        # 上傳圖層樣式：透明底色留紅框
         if uploaded_geojson:
             folium.GeoJson(
                 uploaded_geojson,
+                name="上傳的範圍",
                 style_function=lambda x: {'fillColor': 'transparent', 'color': '#ff0000', 'weight': 2, 'fillOpacity': 0}
             ).add_to(m)
             
@@ -281,6 +303,9 @@ with tab2:
             'circlemarker': False, 'marker': False, 
             'polygon': {'allowIntersection': False}
         }).add_to(m)
+        
+        # 🆕 啟用右上角圖層控制開關
+        folium.LayerControl(position='topright').add_to(m)
         
         map_data = st_folium(m, width="100%", height=650, key="folium_map_satellite")
     
