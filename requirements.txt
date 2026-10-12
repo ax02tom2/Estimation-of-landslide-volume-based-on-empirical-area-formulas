@@ -6,3 +6,6 @@ streamlit-folium
 shapely
 pyproj
 streamlit-drawable-canvas
+geopandas
+fastkml
+lxml
