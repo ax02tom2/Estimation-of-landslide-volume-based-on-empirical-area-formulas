@@ -34,10 +34,24 @@ FORMULAS = [
     {"name": "Martin et al. (2002)", "formula": "V = 1.0359 * A^0.88", "a": 1.0359, "b": 0.88}
 ]
 
+# 台灣縣市中心座標字典 (解決 Geocoding 搜尋不穩定的問題)
+TAIWAN_CITIES = {
+    "選擇縣市快速定位...": None,
+    "台北市": [25.032969, 121.565418], "新北市": [25.011985, 121.464522],
+    "基隆市": [25.132644, 121.739958], "桃園市": [24.993628, 121.300979],
+    "新竹縣": [24.838323, 121.017725], "新竹市": [24.813828, 120.967479],
+    "苗栗縣": [24.560158, 120.821427], "台中市": [24.147735, 120.673648],
+    "彰化縣": [24.051796, 120.539458], "南投縣": [23.903673, 120.672539],
+    "雲林縣": [23.709203, 120.431337], "嘉義縣": [23.451842, 120.255461],
+    "嘉義市": [23.480075, 120.449111], "台南市": [22.999728, 120.227027],
+    "高雄市": [22.627278, 120.301435], "屏東縣": [22.673895, 120.488050],
+    "宜蘭縣": [24.702107, 121.737750], "花蓮縣": [23.987158, 121.601571],
+    "台東縣": [22.758333, 121.144444], "澎湖縣": [23.571089, 119.580231],
+    "金門縣": [24.432709, 118.322384], "連江縣": [26.150493, 119.936081]
+}
+
 def render_results(area_m2):
-    if area_m2 <= 0:
-        return
-        
+    if area_m2 <= 0: return
     area_ha = area_m2 / 10000
     area_km2 = area_m2 / 1000000
     
@@ -49,7 +63,6 @@ def render_results(area_m2):
     for idx, f in enumerate(FORMULAS):
         v = f["a"] * (area_m2 ** f["b"])
         d = v / area_m2 if area_m2 > 0 else 0
-        
         with cols[idx % 3]:
             with st.expander(f"📌 {f['name']}", expanded=True):
                 st.markdown(f"""
@@ -61,9 +74,7 @@ def render_results(area_m2):
                 """, unsafe_allow_html=True)
 
 def process_spatial_file(uploaded_file):
-    """處理上傳的空間檔案，回傳 GeoJSON、面積與 Bounding Box"""
     try:
-        # 修正 1：安全載入 KML 驅動，避免 'NoneType' 錯誤
         try:
             import fiona
             fiona.drvsupport.supported_drivers['KML'] = 'rw'
@@ -95,10 +106,19 @@ def process_spatial_file(uploaded_file):
         else:
             return None, 0, None
 
-        if gdf.crs and gdf.crs.to_epsg() != 4326:
+        # 🚀 終極修正：處理台灣最常見的「TWD97 忘記附 .prj」災難
+        if gdf.crs is None:
+            minx, miny, maxx, maxy = gdf.total_bounds
+            # 如果 X 座標大於 180 (經度極限)，絕對不可能是經緯度，大膽假設是 TWD97 (EPSG:3826)
+            if minx > 180:
+                gdf.set_crs(epsg=3826, inplace=True)
+                st.warning("⚠️ 偵測到無座標系統但數值極大，已自動視為 TWD97 (EPSG:3826) 並進行轉換。")
+            else:
+                gdf.set_crs(epsg=4326, inplace=True)
+        
+        # 強制全部轉成 WGS84 經緯度，Folium 才畫得出來
+        if gdf.crs.to_epsg() != 4326:
             gdf = gdf.to_crs(epsg=4326)
-        elif gdf.crs is None:
-             gdf.set_crs(epsg=4326, inplace=True)
 
         geod = Geod(ellps="WGS84")
         total_area = 0
@@ -107,9 +127,7 @@ def process_spatial_file(uploaded_file):
                 area, _ = geod.geometry_area_perimeter(geom)
                 total_area += abs(area)
         
-        # 修正 2：計算圖層的絕對邊界 [minx, miny, maxx, maxy]
         bounds = gdf.total_bounds 
-        
         return json.loads(gdf.to_json()), total_area, bounds
         
     except Exception as e:
@@ -136,16 +154,12 @@ def inject_folium_draw_fix(m):
     </script>
     """
     m.get_root().html.add_child(Element(js_injection))
-    
     css_injection = """
     <style>
     .leaflet-div-icon.leaflet-editing-icon {
-        width: 3px !important;
-        height: 3px !important;
-        margin-left: -1px !important;
-        margin-top: -1px !important;
-        border-radius: 50% !important;
-        background-color: #ff0000 !important;
+        width: 3px !important; height: 3px !important;
+        margin-left: -1px !important; margin-top: -1px !important;
+        border-radius: 50% !important; background-color: #ff0000 !important;
         border: none !important;
     }
     .leaflet-draw-tooltip { display: none !important; }
@@ -167,88 +181,98 @@ with tab1:
     with col_unit:
         unit_choice = st.selectbox("選擇輸入單位", ["平方公尺 (m²)", "公頃 (ha)", "平方公里 (km²)"])
     
-    if unit_choice == "公頃 (ha)":
-        base_area_m2 = input_area * 10000
-    elif unit_choice == "平方公里 (km²)":
-        base_area_m2 = input_area * 1000000
-    else:
-        base_area_m2 = input_area
+    if unit_choice == "公頃 (ha)": base_area_m2 = input_area * 10000
+    elif unit_choice == "平方公里 (km²)": base_area_m2 = input_area * 1000000
+    else: base_area_m2 = input_area
         
-    if base_area_m2 > 0:
-        render_results(base_area_m2)
+    if base_area_m2 > 0: render_results(base_area_m2)
 
 with tab2:
     st.subheader("在地圖上圈繪或上傳崩塌範圍")
-    st.info("💡 說明：左側工具列可直接圈繪。若要上傳既有範圍，Shapefile 格式請將相關檔案打包成 ZIP 壓縮檔上傳。")
+    st.info("💡 說明：左側地圖可直接點擊圈繪。右側選單可快速定位縣市，或上傳 Shapefile(需打包為ZIP)/KML 檔案。")
     
-    col_search, col_upload = st.columns([2, 2])
+    # 修正排版：左地圖 (3)，右選單 (1)
+    col_map, col_controls = st.columns([3, 1])
     
-    # 修正 3：新增地名搜尋功能
+    # 預設變數
     map_center = [23.6978, 120.9605]
     map_zoom = 7
     fit_bounds_coords = None
-    
-    with col_search:
-        st.write("🔍 **快速定位地區**")
-        search_query = st.text_input("輸入鄉鎮市區、村里或地址 (例如：南投縣仁愛鄉)", placeholder="輸入後按 Enter 搜尋...")
+    uploaded_geojson = None
+    uploaded_area = 0
+
+    with col_controls:
+        st.write("### ⚙️ 操作面板")
+        st.markdown("---")
+        
+        # 功能 1：下拉選單快速定位
+        st.write("📍 **1. 快速定位縣市**")
+        selected_city = st.selectbox("選擇縣市：", list(TAIWAN_CITIES.keys()), label_visibility="collapsed")
+        if TAIWAN_CITIES[selected_city]:
+            map_center = TAIWAN_CITIES[selected_city]
+            map_zoom = 11 # 縣市層級的適當縮放
+        
+        # 功能 2：精確文字搜尋 (選用)
+        st.write("🔍 **2. 進階地名搜尋**")
+        search_query = st.text_input("輸入鄉鎮市區、村里或地址", placeholder="例如：南投縣仁愛鄉...")
         if search_query:
             try:
                 geolocator = Nominatim(user_agent="landslide_app")
                 location = geolocator.geocode(search_query, timeout=5)
                 if location:
                     map_center = [location.latitude, location.longitude]
-                    map_zoom = 13
-                    st.success(f"📍 已定位至：{location.address}")
+                    map_zoom = 14
+                    st.success(f"已定位：{location.name}")
                 else:
-                    st.warning("找不到該地區，請嘗試更換關鍵字。")
+                    st.warning("找不到該地區")
             except GeocoderTimedOut:
-                st.error("地名搜尋服務超時，請稍後再試。")
+                st.error("搜尋服務超時")
             except Exception as e:
-                st.error(f"搜尋發生錯誤: {str(e)}")
-
-    with col_upload:
-        st.write("📂 **上傳空間範圍檔 (ZIP/KML/GeoJSON)**")
-        spatial_file = st.file_uploader("支援 ZIP(Shapefile), KML, KMZ, GeoJSON", type=['zip', 'kml', 'kmz', 'geojson'], label_visibility="collapsed")
-    
-    uploaded_geojson = None
-    uploaded_area = 0
-
-    if spatial_file:
-        uploaded_geojson, uploaded_area, uploaded_bounds = process_spatial_file(spatial_file)
-        # 修正 2：如果有上傳檔案，嚴格設定 Bounding Box 以完全包含圖形
-        if uploaded_bounds is not None:
-            minx, miny, maxx, maxy = uploaded_bounds
-            fit_bounds_coords = [[miny, minx], [maxy, maxx]]
-
-    m = folium.Map(location=map_center, zoom_start=map_zoom) 
-    
-    # 如果有邊界需要自動縮放 (優先度最高)
-    if fit_bounds_coords:
-        m.fit_bounds(fit_bounds_coords)
+                pass
         
-    inject_folium_draw_fix(m) 
-    
-    folium.TileLayer(
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-        attr='Google',
-        name='Google Satellite',
-        overlay=False,
-        control=True
-    ).add_to(m)
-    
-    if uploaded_geojson:
-        folium.GeoJson(
-            uploaded_geojson,
-            style_function=lambda x: {'fillColor': '#ff0000', 'color': '#ff0000', 'weight': 2, 'fillOpacity': 0.4}
+        st.markdown("---")
+        
+        # 功能 3：上傳空間檔案
+        st.write("📂 **3. 上傳空間範圍檔**")
+        st.caption("支援 ZIP(Shapefile), KML, KMZ, GeoJSON")
+        spatial_file = st.file_uploader("上傳檔案", type=['zip', 'kml', 'kmz', 'geojson'], label_visibility="collapsed")
+        
+        if spatial_file:
+            uploaded_geojson, uploaded_area, uploaded_bounds = process_spatial_file(spatial_file)
+            if uploaded_bounds is not None:
+                minx, miny, maxx, maxy = uploaded_bounds
+                fit_bounds_coords = [[miny, minx], [maxy, maxx]]
+
+    with col_map:
+        m = folium.Map(location=map_center, zoom_start=map_zoom) 
+        
+        if fit_bounds_coords:
+            m.fit_bounds(fit_bounds_coords)
+            
+        inject_folium_draw_fix(m) 
+        
+        folium.TileLayer(
+            tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+            attr='Google',
+            name='Google Satellite',
+            overlay=False,
+            control=True
         ).add_to(m)
         
-    Draw(export=True, position='topleft', draw_options={
-        'polyline': False, 'rectangle': False, 'circle': False, 
-        'circlemarker': False, 'marker': False, 
-        'polygon': {'allowIntersection': False}
-    }).add_to(m)
-    
-    map_data = st_folium(m, width="100%", height=500, key="folium_map_satellite")
+        if uploaded_geojson:
+            folium.GeoJson(
+                uploaded_geojson,
+                style_function=lambda x: {'fillColor': '#ff0000', 'color': '#ff0000', 'weight': 2, 'fillOpacity': 0.4}
+            ).add_to(m)
+            
+        Draw(export=True, position='topleft', draw_options={
+            'polyline': False, 'rectangle': False, 'circle': False, 
+            'circlemarker': False, 'marker': False, 
+            'polygon': {'allowIntersection': False}
+        }).add_to(m)
+        
+        # 地圖高度配合視窗加高
+        map_data = st_folium(m, width="100%", height=650, key="folium_map_satellite")
     
     final_area = 0
     if map_data and map_data.get("all_drawings") and len(map_data["all_drawings"]) > 0:
