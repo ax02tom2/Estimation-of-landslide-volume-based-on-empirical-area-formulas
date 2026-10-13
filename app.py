@@ -34,9 +34,9 @@ FORMULAS = [
     {"name": "Martin et al. (2002)", "formula": "V = 1.0359 * A^0.88", "a": 1.0359, "b": 0.88}
 ]
 
-# 顏色對應表 (用於手動多邊形自動變色)
-DRAW_COLORS = ['#FF0000', '#0000FF', '#008000', '#800080', '#FFA500', '#8B4513', '#000000']
-DRAW_EMOJIS = ['🔴', '🔵', '🟢', '🟣', '🟠', '🟤', '⚫']
+# 顏色對應表 (從藍色開始，避免與上傳檔案的紅框撞色)
+DRAW_COLORS = ['#0000FF', '#008000', '#800080', '#FFA500', '#8B4513', '#000000', '#FF0000']
+DRAW_EMOJIS = ['🔵', '🟢', '🟣', '🟠', '🟤', '⚫', '🔴']
 
 TW_DISTRICTS = {
     "請選擇縣市...": ["請先選擇縣市"],
@@ -145,46 +145,58 @@ def process_spatial_file(uploaded_file):
         return None, 0, None
 
 # -----------------------------------------------------------------------------
-# 🚀 終極底層注入：多邊形自動上色與縮小編輯節點
+# 🚀 終極底層注入：多邊形自動上色與縮小編輯節點 (修復版)
 # -----------------------------------------------------------------------------
 def inject_folium_draw_fix(m):
-    js_injection = f"""
+    js_injection = """
     <script>
-        document.addEventListener("DOMContentLoaded", function() {{
-            // 縮小編輯用的白色把手
-            setTimeout(function() {{
-                if (typeof L !== 'undefined' && L.Edit && L.Edit.PolyVerticesEdit) {{
-                    L.Edit.PolyVerticesEdit.prototype.options.icon = new L.DivIcon({{
+        document.addEventListener("DOMContentLoaded", function() {
+            setTimeout(function() {
+                if (typeof L !== 'undefined' && L.Edit && L.Edit.PolyVerticesEdit) {
+                    L.Edit.PolyVerticesEdit.prototype.options.icon = new L.DivIcon({
                         iconSize: new L.Point(2, 2),
                         className: 'leaflet-div-icon leaflet-editing-icon'
-                    }});
-                    L.Edit.PolyVerticesEdit.prototype.options.touchIcon = new L.DivIcon({{
+                    });
+                    L.Edit.PolyVerticesEdit.prototype.options.touchIcon = new L.DivIcon({
                         iconSize: new L.Point(2, 2),
                         className: 'leaflet-div-icon leaflet-editing-icon leaflet-touch-icon'
-                    }});
-                }}
-            }}, 1000);
+                    });
+                }
+            }, 1000);
 
-            // 每 200 毫秒掃描一次地圖上的多邊形，依序賦予不同顏色
-            setInterval(function() {{
-                var colors = {DRAW_COLORS};
-                var panes = document.querySelectorAll('.leaflet-overlay-pane');
-                panes.forEach(function(pane) {{
-                    var paths = pane.querySelectorAll('path.leaflet-interactive');
-                    var polyIndex = 0;
-                    paths.forEach(function(path) {{
-                        var fillOpacity = path.getAttribute('fill-opacity');
-                        // 辨識條件：手動圈繪的多邊形預設 fillOpacity 約為 0.2，上傳的檔案我們設為 0
-                        if (fillOpacity !== '0' && fillOpacity !== 0) {{
-                            var color = colors[polyIndex % colors.length];
-                            path.setAttribute('stroke', color);
-                            path.setAttribute('fill', color);
-                            polyIndex++;
-                        }}
-                    }});
-                }});
-            }}, 200);
-        }});
+            // 每 200 毫秒強力掃描一次，確保圖形確實變色
+            setInterval(function() {
+                var colors = ['#0000FF', '#008000', '#800080', '#FFA500', '#8B4513', '#000000', '#FF0000'];
+                var paths = document.querySelectorAll('path.leaflet-interactive');
+                var drawPaths = [];
+                
+                paths.forEach(function(path) {
+                    var stroke = path.getAttribute('stroke');
+                    var isDrawn = false;
+                    
+                    // 鎖定 Leaflet Draw 產生的預設淺藍色 (#3388ff) 進行標記
+                    if (stroke === '#3388ff') {
+                        isDrawn = true;
+                        path.setAttribute('data-drawn', 'true');
+                    } else if (path.getAttribute('data-drawn') === 'true') {
+                        isDrawn = true;
+                    }
+                    
+                    if (isDrawn) {
+                        drawPaths.push(path);
+                    }
+                });
+
+                // 依序賦予新的顏色
+                drawPaths.forEach(function(path, index) {
+                    var color = colors[index % colors.length];
+                    path.setAttribute('stroke', color);
+                    path.setAttribute('fill', color);
+                    path.style.stroke = color;
+                    path.style.fill = color;
+                });
+            }, 200);
+        });
     </script>
     """
     m.get_root().html.add_child(Element(js_injection))
@@ -252,117 +264,3 @@ with tab2:
         
         district_options = TW_DISTRICTS[selected_city]
         selected_district = st.selectbox("選擇鄉鎮市區：", district_options, key="district_selector")
-        
-        if selected_city != "請選擇縣市..." and selected_district != "請先選擇縣市":
-            search_target = f"台灣 {selected_city} {selected_district}"
-            location = safe_geocode(search_target)
-            if location:
-                map_center = [location.latitude, location.longitude]
-                map_zoom = 13
-                st.success(f"已精確定位：{selected_city}{selected_district}")
-
-        st.write("🔍 **2. 進階地名/地址搜尋**")
-        search_query = st.text_input("輸入詳細地址或地標", placeholder="例如：阿里山鄉...")
-        if search_query:
-            location = safe_geocode(search_query)
-            if location:
-                map_center = [location.latitude, location.longitude]
-                map_zoom = 15
-        
-        st.markdown("---")
-        
-        st.write("📂 **3. 上傳空間範圍檔**")
-        st.caption("支援 ZIP(Shapefile), KML, KMZ, GeoJSON")
-        spatial_file = st.file_uploader("上傳檔案", type=['zip', 'kml', 'kmz', 'geojson'], label_visibility="collapsed")
-        
-        if spatial_file:
-            uploaded_geojson, uploaded_area, uploaded_bounds = process_spatial_file(spatial_file)
-            if uploaded_bounds is not None:
-                minx, miny, maxx, maxy = uploaded_bounds
-                fit_bounds_coords = [[miny, minx], [maxy, maxx]]
-
-    with col_map:
-        m = folium.Map(location=map_center, zoom_start=map_zoom) 
-        
-        if fit_bounds_coords:
-            m.fit_bounds(fit_bounds_coords)
-            
-        inject_folium_draw_fix(m) 
-        
-        folium.TileLayer(
-            tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-            attr='Google',
-            name='Google 衛星影像 (預設/近期)',
-            overlay=False,
-            control=True
-        ).add_to(m)
-
-        folium.TileLayer(
-            tiles='https://wmts.nlsc.gov.tw/wmts/PHOTO2/default/GoogleMapsCompatible/{z}/{y}/{x}',
-            attr='NLSC',
-            name='NLSC 國土測繪中心-正射影像',
-            overlay=False,
-            control=True
-        ).add_to(m)
-
-        folium.TileLayer(
-            tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-            attr='Esri',
-            name='ESRI World Imagery',
-            overlay=False,
-            control=True
-        ).add_to(m)
-        
-        if uploaded_geojson:
-            folium.GeoJson(
-                uploaded_geojson,
-                name="上傳的範圍",
-                style_function=lambda x: {'fillColor': 'transparent', 'color': '#ff0000', 'weight': 2, 'fillOpacity': 0}
-            ).add_to(m)
-            
-        Draw(export=True, position='topleft', draw_options={
-            'polyline': False, 'rectangle': False, 'circle': False, 
-            'circlemarker': False, 'marker': False, 
-            'polygon': {'allowIntersection': False}
-        }).add_to(m)
-        
-        folium.LayerControl(position='topright').add_to(m)
-        
-        map_data = st_folium(m, width="100%", height=650, key="folium_map_satellite")
-    
-    # -------------------------------------------------------------------------
-    # 🚀 顏色聯動：將畫布上的顏色同步顯示在選項名稱上
-    # -------------------------------------------------------------------------
-    available_areas = {}
-    
-    if spatial_file and uploaded_area > 0:
-        option_name = f"📂 上傳的空間圖層 (面積：約 {uploaded_area:,.0f} m²)"
-        available_areas[option_name] = uploaded_area
-        
-    if map_data and map_data.get("all_drawings"):
-        for i, drawing in enumerate(map_data["all_drawings"]):
-            if drawing["geometry"]["type"] == "Polygon":
-                geom = shape(drawing["geometry"])
-                geod = Geod(ellps="WGS84")
-                area, _ = geod.geometry_area_perimeter(geom)
-                abs_area = abs(area)
-                
-                # 自動賦予對應的顏色球 (順序與 JS 注入的變色邏輯完全一致)
-                emoji = DRAW_EMOJIS[i % len(DRAW_EMOJIS)]
-                poly_name = f"多邊形 {i+1}"
-                option_name = f"{emoji} 手動圈繪 - {poly_name} (面積：約 {abs_area:,.0f} m²)"
-                
-                available_areas[option_name] = abs_area
-    
-    if available_areas:
-        st.markdown("---")
-        st.markdown("### 🧮 選擇計算目標")
-        st.write("系統偵測到畫面中包含多個範圍，請透過**顏色符號**與**面積大小**，選擇您要計算的目標：")
-        
-        options = list(available_areas.keys())
-        default_index = len(options) - 1 
-        
-        selected_source = st.radio("選擇目標", options, index=default_index, label_visibility="collapsed")
-        
-        final_area = available_areas[selected_source]
-        render_results(final_area)
