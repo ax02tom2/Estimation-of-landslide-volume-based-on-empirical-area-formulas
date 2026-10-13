@@ -34,7 +34,7 @@ FORMULAS = [
     {"name": "Martin et al. (2002)", "formula": "V = 1.0359 * A^0.88", "a": 1.0359, "b": 0.88}
 ]
 
-# 全新顏色對應表 (故意避開預設藍色，從橘色、紫色、綠色開始)
+# 顏色對應表 (從橘色開始，依序變化)
 DRAW_COLORS = ['#FF8C00', '#800080', '#008000', '#0000FF', '#8B4513', '#FF00FF', '#000000']
 DRAW_EMOJIS = ['🟠', '🟣', '🟢', '🔵', '🟤', '🟪', '⚫']
 
@@ -145,70 +145,11 @@ def process_spatial_file(uploaded_file):
         return None, 0, None
 
 # -----------------------------------------------------------------------------
-# 🚀 終極霸道變色腳本：強制介入 SVG 圖層修改顏色，無懼任何防護
+# 🚀 真正能生效的底層注入腳本：使用 Folium 的 .script 來保證執行
 # -----------------------------------------------------------------------------
 def inject_folium_draw_fix(m):
-    # 使用純字串與 REPLACE，避開任何 Python 與 JS 大括號語法衝突的風險
-    js_template = """
-    <script>
-        // 縮小白點
-        document.addEventListener("DOMContentLoaded", function() {
-            setTimeout(function() {
-                if (typeof L !== 'undefined' && L.Edit && L.Edit.PolyVerticesEdit) {
-                    L.Edit.PolyVerticesEdit.prototype.options.icon = new L.DivIcon({
-                        iconSize: new L.Point(2, 2),
-                        className: 'leaflet-div-icon leaflet-editing-icon'
-                    });
-                    L.Edit.PolyVerticesEdit.prototype.options.touchIcon = new L.DivIcon({
-                        iconSize: new L.Point(2, 2),
-                        className: 'leaflet-div-icon leaflet-editing-icon leaflet-touch-icon'
-                    });
-                }
-            }, 1000);
-        });
-
-        // 每 100 毫秒極速掃描所有路徑，強制上色
-        setInterval(function() {
-            var colors = COLOR_ARRAY_PLACEHOLDER;
-            
-            // 鎖定地圖圖層，避免改到外面的工具按鈕
-            var panes = document.querySelectorAll('.leaflet-overlay-pane');
-            if (panes.length === 0) return;
-            
-            panes.forEach(function(pane) {
-                var paths = pane.querySelectorAll('path');
-                var drawIndex = 0;
-                
-                for (var i = 0; i < paths.length; i++) {
-                    var path = paths[i];
-                    var strokeColor = path.getAttribute('stroke');
-                    var fillOpacity = path.getAttribute('fill-opacity');
-                    
-                    // 排除防線：如果是紅色 (#ff0000) 且透明度為 0 的「上傳底框」，絕對不要動它！
-                    if (strokeColor && strokeColor.toLowerCase() === '#ff0000') {
-                        if (fillOpacity === '0' || fillOpacity === '0.0' || fillOpacity === 0) {
-                            continue; 
-                        }
-                    }
-                    
-                    // 只要不是上傳的底框，全部視為手動圈繪的多邊形，依序強制換色
-                    var targetColor = colors[drawIndex % colors.length];
-                    
-                    path.setAttribute('stroke', targetColor);
-                    path.setAttribute('fill', targetColor);
-                    path.style.stroke = targetColor;
-                    path.style.fill = targetColor;
-                    
-                    drawIndex++;
-                }
-            });
-        }, 100); 
-    </script>
-    """
     
-    js_injection = js_template.replace("COLOR_ARRAY_PLACEHOLDER", str(DRAW_COLORS))
-    m.get_root().html.add_child(Element(js_injection))
-    
+    # 1. 縮小白點 CSS (透過 header 注入保證有效)
     css_injection = """
     <style>
     .leaflet-div-icon.leaflet-editing-icon {
@@ -221,6 +162,65 @@ def inject_folium_draw_fix(m):
     </style>
     """
     m.get_root().header.add_child(Element(css_injection))
+
+    # 2. 變色與節點邏輯 (直接注入到 Folium 預設的 Script 區塊，絕對不會被 Streamlit 阻擋)
+    js_logic = """
+    // 縮小白點圖示設定
+    setTimeout(function() {
+        if (typeof L !== 'undefined' && L.Edit && L.Edit.PolyVerticesEdit) {
+            L.Edit.PolyVerticesEdit.prototype.options.icon = new L.DivIcon({
+                iconSize: new L.Point(2, 2),
+                className: 'leaflet-div-icon leaflet-editing-icon'
+            });
+            L.Edit.PolyVerticesEdit.prototype.options.touchIcon = new L.DivIcon({
+                iconSize: new L.Point(2, 2),
+                className: 'leaflet-div-icon leaflet-editing-icon leaflet-touch-icon'
+            });
+        }
+    }, 1000);
+
+    // 強制變色迴圈
+    setInterval(function() {
+        var colors = COLOR_ARRAY_PLACEHOLDER;
+        var paths = document.getElementsByTagName('path');
+        var drawIndex = 0;
+        
+        for (var i = 0; i < paths.length; i++) {
+            var path = paths[i];
+            var stroke = path.getAttribute('stroke');
+            var styleStroke = path.style.stroke;
+            var fill = path.getAttribute('fill');
+            
+            // 【過濾 1】如果是我們上傳的紅框，絕對跳過
+            var isUpload = false;
+            if (stroke && (stroke.toLowerCase() === '#ff0000' || stroke === 'red' || stroke === 'rgb(255, 0, 0)')) {
+                isUpload = true;
+            }
+            if (styleStroke && (styleStroke.toLowerCase() === '#ff0000' || styleStroke === 'red' || styleStroke === 'rgb(255, 0, 0)')) {
+                isUpload = true;
+            }
+            if (isUpload) continue;
+            
+            // 【過濾 2】只針對「已經畫完、且有底色」的多邊形變色 (避免把正在畫的虛線或指引線變色)
+            if (!fill || fill === 'none') {
+                continue; 
+            }
+            
+            // 強制變色！
+            var c = colors[drawIndex % colors.length];
+            path.setAttribute('stroke', c);
+            path.setAttribute('fill', c);
+            path.style.stroke = c;
+            path.style.fill = c;
+            drawIndex++;
+        }
+    }, 200);
+    """
+    
+    # 替換顏色變數
+    js_final = js_logic.replace("COLOR_ARRAY_PLACEHOLDER", str(DRAW_COLORS))
+    # 使用 .script.add_child 確保代碼直接寫在 Folium 的執行域中，繞過所有阻擋！
+    m.get_root().script.add_child(Element(js_final))
 
 def safe_geocode(query):
     try:
