@@ -10,9 +10,10 @@ import json
 import zipfile
 import os
 import tempfile
+from branca.element import Element, MacroElement
+from jinja2 import Template
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
-from branca.element import Element
 
 # -----------------------------------------------------------------------------
 # 系統設定
@@ -33,6 +34,10 @@ FORMULAS = [
     {"name": "Larsen & Torres Sanchez (1998)", "formula": "V = 1.826 * A^0.989", "a": 1.826, "b": 0.989},
     {"name": "Martin et al. (2002)", "formula": "V = 1.0359 * A^0.88", "a": 1.0359, "b": 0.88}
 ]
+
+# 顏色對應表 (從橘色開始，依序變化)
+DRAW_COLORS = ['#FF8C00', '#800080', '#008000', '#0000FF', '#8B4513', '#FF00FF', '#000000']
+DRAW_EMOJIS = ['🟠', '🟣', '🟢', '🔵', '🟤', '🟪', '⚫']
 
 TW_DISTRICTS = {
     "請選擇縣市...": ["請先選擇縣市"],
@@ -141,9 +146,47 @@ def process_spatial_file(uploaded_file):
         return None, 0, None
 
 # -----------------------------------------------------------------------------
-# 保留唯一穩定運作的「縮小編輯白點」樣式 (完全拔除會失效的變色腳本)
+# 🚀 真正能生效的底層注入腳本：使用 Folium 的 .script 來保證執行
 # -----------------------------------------------------------------------------
+class PolygonColorizer(MacroElement):
+    """每畫完一個多邊形，就依序指定顏色，並把編號 (color_idx) 存進該圖形的 properties。
+    編號是「建立當下」決定的，之後刪除或編輯其他圖形都不會讓它變色或跳號。"""
+    _template = Template("""
+        {% macro script(this, kwargs) %}
+        (function() {
+            var map = {{ this._parent.get_name() }};
+            var colors = {{ this.colors_json }};
+            map.on('draw:created', function(e) {
+                var layer = e.layer;
+                if (!(layer instanceof L.Polygon)) return;
+                // 找出目前地圖上已用過的最大編號，新圖形用 +1
+                var maxIdx = -1;
+                map.eachLayer(function(l) {
+                    if (l.feature && l.feature.properties &&
+                        typeof l.feature.properties.color_idx === 'number') {
+                        maxIdx = Math.max(maxIdx, l.feature.properties.color_idx);
+                    }
+                });
+                var idx = maxIdx + 1;
+                var c = colors[idx % colors.length];
+                layer.feature = layer.feature || {type: 'Feature', properties: {}};
+                layer.feature.properties = layer.feature.properties || {};
+                layer.feature.properties.color_idx = idx;
+                layer.setStyle({color: c, fillColor: c, weight: 3, opacity: 1, fillOpacity: 0.35});
+            });
+        })();
+        {% endmacro %}
+    """)
+
+    def __init__(self, colors):
+        super().__init__()
+        self._name = "PolygonColorizer"
+        self.colors_json = json.dumps(colors)
+
+
 def inject_folium_draw_fix(m):
+    
+    # 1. 縮小白點 CSS (透過 header 注入保證有效)
     css_injection = """
     <style>
     .leaflet-div-icon.leaflet-editing-icon {
@@ -156,6 +199,29 @@ def inject_folium_draw_fix(m):
     </style>
     """
     m.get_root().header.add_child(Element(css_injection))
+
+    # 2. 變色與節點邏輯 (直接注入到 Folium 預設的 Script 區塊，絕對不會被 Streamlit 阻擋)
+    js_logic = """
+    // 縮小白點圖示設定
+    setTimeout(function() {
+        if (typeof L !== 'undefined' && L.Edit && L.Edit.PolyVerticesEdit) {
+            L.Edit.PolyVerticesEdit.prototype.options.icon = new L.DivIcon({
+                iconSize: new L.Point(2, 2),
+                className: 'leaflet-div-icon leaflet-editing-icon'
+            });
+            L.Edit.PolyVerticesEdit.prototype.options.touchIcon = new L.DivIcon({
+                iconSize: new L.Point(2, 2),
+                className: 'leaflet-div-icon leaflet-editing-icon leaflet-touch-icon'
+            });
+        }
+    }, 1000);
+
+    """
+    
+    m.get_root().script.add_child(Element(js_logic))
+
+    # 3. 依畫圖順序指定顏色：在「畫完」的瞬間把顏色編號寫進圖形本身
+    PolygonColorizer(DRAW_COLORS).add_to(m)
 
 def safe_geocode(query):
     try:
@@ -188,7 +254,7 @@ with tab1:
 
 with tab2:
     st.subheader("在地圖上圈繪或上傳崩塌範圍")
-    st.info("💡 受限於網頁框架底層限制，您畫的多邊形將維持預設的藍色。請透過下方「對照表」的面積與經緯度鎖定目標。")
+    st.info("💡 說明：您可以手動繪製多個圖形，系統會**自動依序變色**，並在下方選單顯示對應顏色以便選擇。")
     
     col_map, col_controls = st.columns([3, 1])
     
@@ -287,12 +353,12 @@ with tab2:
         map_data = st_folium(m, width="100%", height=650, key="folium_map_satellite")
     
     # -------------------------------------------------------------------------
-    # 🚀 將操作面板改為詳盡的「測量紀錄對照表」
+    # 🚀 顏色聯動：將畫布上的顏色同步顯示在選項名稱上
     # -------------------------------------------------------------------------
     available_areas = {}
     
     if spatial_file and uploaded_area > 0:
-        option_name = f"📂 上傳圖層 ｜ 面積: 約 {uploaded_area:,.0f} m²"
+        option_name = f"📂 上傳的空間圖層 (面積：約 {uploaded_area:,.0f} m²)"
         available_areas[option_name] = uploaded_area
         
     if map_data and map_data.get("all_drawings"):
@@ -303,21 +369,22 @@ with tab2:
                 area, _ = geod.geometry_area_perimeter(geom)
                 abs_area = abs(area)
                 
-                # 計算中心點，讓使用者就算面積一樣也能靠座標區分
-                centroid = geom.centroid
-                lat = round(centroid.y, 4)
-                lon = round(centroid.x, 4)
-                
-                # 選單文字改為測量表格的形式
-                poly_name = f"圖形 {i+1} (最舊)" if i == 0 else f"圖形 {i+1} (最新)" if i == len(map_data["all_drawings"])-1 else f"圖形 {i+1}"
-                option_name = f"🖍️ {poly_name} ｜ 面積: 約 {abs_area:,.0f} m² ｜ 中心座標: (N {lat}, E {lon})"
+                # 顏色編號由前端在「畫完」時寫入 properties.color_idx；
+                # 若讀不到 (例如舊資料) 才退回用清單順序
+                props = drawing.get("properties") or {}
+                cidx = props.get("color_idx")
+                if not isinstance(cidx, int):
+                    cidx = i
+                emoji = DRAW_EMOJIS[cidx % len(DRAW_EMOJIS)]
+                poly_name = f"多邊形 {cidx+1}"
+                option_name = f"{emoji} 手動圈繪 - {poly_name} (面積：約 {abs_area:,.0f} m²)"
                 
                 available_areas[option_name] = abs_area
     
     if available_areas:
         st.markdown("---")
-        st.markdown("### 🧮 測量紀錄對照與計算")
-        st.write("請依據下方表格的 **繪製順序**、**面積** 或 **中心座標**，選擇您要推估量體的範圍：")
+        st.markdown("### 🧮 選擇計算目標")
+        st.write("系統偵測到畫面中包含多個範圍，請透過**顏色符號**與**面積大小**，選擇您要計算的目標：")
         
         options = list(available_areas.keys())
         default_index = len(options) - 1 
