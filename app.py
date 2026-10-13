@@ -290,9 +290,7 @@ with tab2:
             if location:
                 map_center = [location.latitude, location.longitude]
                 map_zoom = 15
-        
-        st.markdown("---")
-        
+              
         st.write("📂 **3. 上傳空間範圍檔**")
         st.caption("支援 ZIP(Shapefile), KML, KMZ, GeoJSON")
         spatial_file = st.file_uploader("上傳檔案", type=['zip', 'kml', 'kmz', 'geojson'], label_visibility="collapsed")
