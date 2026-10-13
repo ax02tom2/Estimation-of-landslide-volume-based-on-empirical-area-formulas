@@ -34,9 +34,9 @@ FORMULAS = [
     {"name": "Martin et al. (2002)", "formula": "V = 1.0359 * A^0.88", "a": 1.0359, "b": 0.88}
 ]
 
-# 顏色對應表 (第一個畫的會是紅色，第二個是藍色...)
-DRAW_COLORS = ['#FF0000', '#0000FF', '#008000', '#800080', '#FFA500', '#8B4513', '#000000']
-DRAW_EMOJIS = ['🔴', '🔵', '🟢', '🟣', '🟠', '🟤', '⚫']
+# 全新顏色對應表 (故意避開預設藍色，從橘色、紫色、綠色開始)
+DRAW_COLORS = ['#FF8C00', '#800080', '#008000', '#0000FF', '#8B4513', '#FF00FF', '#000000']
+DRAW_EMOJIS = ['🟠', '🟣', '🟢', '🔵', '🟤', '🟪', '⚫']
 
 TW_DISTRICTS = {
     "請選擇縣市...": ["請先選擇縣市"],
@@ -145,12 +145,13 @@ def process_spatial_file(uploaded_file):
         return None, 0, None
 
 # -----------------------------------------------------------------------------
-# 🚀 終極修復版：多邊形自動上色與縮小編輯節點 (徹底解決語法衝突)
+# 🚀 終極霸道變色腳本：強制介入 SVG 圖層修改顏色，無懼任何防護
 # -----------------------------------------------------------------------------
 def inject_folium_draw_fix(m):
-    # 使用純字串與 replace，絕對避免 Python 與 JS 的大括號語法衝突
+    # 使用純字串與 REPLACE，避開任何 Python 與 JS 大括號語法衝突的風險
     js_template = """
     <script>
+        // 縮小白點
         document.addEventListener("DOMContentLoaded", function() {
             setTimeout(function() {
                 if (typeof L !== 'undefined' && L.Edit && L.Edit.PolyVerticesEdit) {
@@ -164,38 +165,48 @@ def inject_folium_draw_fix(m):
                     });
                 }
             }, 1000);
+        });
 
-            setInterval(function() {
-                var colors = COLOR_ARRAY_PLACEHOLDER;
-                var paths = document.querySelectorAll('path.leaflet-interactive');
+        // 每 100 毫秒極速掃描所有路徑，強制上色
+        setInterval(function() {
+            var colors = COLOR_ARRAY_PLACEHOLDER;
+            
+            // 鎖定地圖圖層，避免改到外面的工具按鈕
+            var panes = document.querySelectorAll('.leaflet-overlay-pane');
+            if (panes.length === 0) return;
+            
+            panes.forEach(function(pane) {
+                var paths = pane.querySelectorAll('path');
                 var drawIndex = 0;
                 
-                paths.forEach(function(path) {
+                for (var i = 0; i < paths.length; i++) {
+                    var path = paths[i];
                     var strokeColor = path.getAttribute('stroke');
+                    var fillOpacity = path.getAttribute('fill-opacity');
                     
-                    // 鎖定 Leaflet Draw 產生的預設淺藍色 (#3388ff)
-                    if (strokeColor === '#3388ff') {
-                        path.setAttribute('data-is-drawn', 'true');
+                    // 排除防線：如果是紅色 (#ff0000) 且透明度為 0 的「上傳底框」，絕對不要動它！
+                    if (strokeColor && strokeColor.toLowerCase() === '#ff0000') {
+                        if (fillOpacity === '0' || fillOpacity === '0.0' || fillOpacity === 0) {
+                            continue; 
+                        }
                     }
                     
-                    // 如果被標記為手動圖形，就依序改變顏色
-                    if (path.getAttribute('data-is-drawn') === 'true') {
-                        var color = colors[drawIndex % colors.length];
-                        path.setAttribute('stroke', color);
-                        path.setAttribute('fill', color);
-                        path.style.stroke = color;
-                        path.style.fill = color;
-                        drawIndex++;
-                    }
-                });
-            }, 200);
-        });
+                    // 只要不是上傳的底框，全部視為手動圈繪的多邊形，依序強制換色
+                    var targetColor = colors[drawIndex % colors.length];
+                    
+                    path.setAttribute('stroke', targetColor);
+                    path.setAttribute('fill', targetColor);
+                    path.style.stroke = targetColor;
+                    path.style.fill = targetColor;
+                    
+                    drawIndex++;
+                }
+            });
+        }, 100); 
     </script>
     """
     
-    # 安全注入顏色陣列
     js_injection = js_template.replace("COLOR_ARRAY_PLACEHOLDER", str(DRAW_COLORS))
-    
     m.get_root().html.add_child(Element(js_injection))
     
     css_injection = """
