@@ -223,3 +223,156 @@ def safe_geocode(query):
 
 # -----------------------------------------------------------------------------
 # 主功能切換 Tabs
+# -----------------------------------------------------------------------------
+tab1, tab2 = st.tabs(["🔢 1. 數值直接輸入", "🗺️ 2. 衛星底圖圈繪 (含 GIS 檔案)"])
+
+with tab1:
+    st.subheader("手動輸入面積 (自動換算單位)")
+    col_input, col_unit = st.columns([2, 1])
+    with col_input:
+        input_area = st.number_input("輸入面積數值", min_value=0.0, value=0.0, step=0.1)
+    with col_unit:
+        unit_choice = st.selectbox("選擇輸入單位", ["平方公尺 (m²)", "公頃 (ha)", "平方公里 (km²)"])
+    
+    if unit_choice == "公頃 (ha)": base_area_m2 = input_area * 10000
+    elif unit_choice == "平方公里 (km²)": base_area_m2 = input_area * 1000000
+    else: base_area_m2 = input_area
+        
+    if base_area_m2 > 0: render_results(base_area_m2)
+
+with tab2:
+    st.subheader("在地圖上圈繪或上傳崩塌範圍")
+    st.info("💡 說明：您可以手動繪製多個圖形，系統會**自動依序變色**，並在下方選單顯示對應顏色以便選擇。")
+    
+    col_map, col_controls = st.columns([3, 1])
+    
+    map_center = [23.9782, 121.1332]
+    map_zoom = 8
+    fit_bounds_coords = None
+    uploaded_geojson = None
+    uploaded_area = 0
+
+    with col_controls:
+        st.write("### ⚙️ 操作面板")
+        st.markdown("---")
+        
+        st.write("📍 **1. 快速定位鄉鎮市區**")
+        city_options = list(TW_DISTRICTS.keys())
+        selected_city = st.selectbox("選擇縣市：", city_options, key="city_selector")
+        
+        district_options = TW_DISTRICTS[selected_city]
+        selected_district = st.selectbox("選擇鄉鎮市區：", district_options, key="district_selector")
+        
+        if selected_city != "請選擇縣市..." and selected_district != "請先選擇縣市":
+            search_target = f"台灣 {selected_city} {selected_district}"
+            location = safe_geocode(search_target)
+            if location:
+                map_center = [location.latitude, location.longitude]
+                map_zoom = 13
+                st.success(f"已精確定位：{selected_city}{selected_district}")
+
+        st.write("🔍 **2. 進階地名/地址搜尋**")
+        search_query = st.text_input("輸入詳細地址或地標", placeholder="例如：阿里山鄉...")
+        if search_query:
+            location = safe_geocode(search_query)
+            if location:
+                map_center = [location.latitude, location.longitude]
+                map_zoom = 15
+        
+        st.markdown("---")
+        
+        st.write("📂 **3. 上傳空間範圍檔**")
+        st.caption("支援 ZIP(Shapefile), KML, KMZ, GeoJSON")
+        spatial_file = st.file_uploader("上傳檔案", type=['zip', 'kml', 'kmz', 'geojson'], label_visibility="collapsed")
+        
+        if spatial_file:
+            uploaded_geojson, uploaded_area, uploaded_bounds = process_spatial_file(spatial_file)
+            if uploaded_bounds is not None:
+                minx, miny, maxx, maxy = uploaded_bounds
+                fit_bounds_coords = [[miny, minx], [maxy, maxx]]
+
+    with col_map:
+        m = folium.Map(location=map_center, zoom_start=map_zoom) 
+        
+        if fit_bounds_coords:
+            m.fit_bounds(fit_bounds_coords)
+            
+        inject_folium_draw_fix(m) 
+        
+        folium.TileLayer(
+            tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+            attr='Google',
+            name='Google 衛星影像 (預設/近期)',
+            overlay=False,
+            control=True
+        ).add_to(m)
+
+        folium.TileLayer(
+            tiles='https://wmts.nlsc.gov.tw/wmts/PHOTO2/default/GoogleMapsCompatible/{z}/{y}/{x}',
+            attr='NLSC',
+            name='NLSC 國土測繪中心-正射影像',
+            overlay=False,
+            control=True
+        ).add_to(m)
+
+        folium.TileLayer(
+            tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+            attr='Esri',
+            name='ESRI World Imagery',
+            overlay=False,
+            control=True
+        ).add_to(m)
+        
+        if uploaded_geojson:
+            folium.GeoJson(
+                uploaded_geojson,
+                name="上傳的範圍",
+                style_function=lambda x: {'fillColor': 'transparent', 'color': '#ff0000', 'weight': 2, 'fillOpacity': 0}
+            ).add_to(m)
+            
+        Draw(export=True, position='topleft', draw_options={
+            'polyline': False, 'rectangle': False, 'circle': False, 
+            'circlemarker': False, 'marker': False, 
+            'polygon': {'allowIntersection': False}
+        }).add_to(m)
+        
+        folium.LayerControl(position='topright').add_to(m)
+        
+        map_data = st_folium(m, width="100%", height=650, key="folium_map_satellite")
+    
+    # -------------------------------------------------------------------------
+    # 🚀 顏色聯動：將畫布上的顏色同步顯示在選項名稱上
+    # -------------------------------------------------------------------------
+    available_areas = {}
+    
+    if spatial_file and uploaded_area > 0:
+        option_name = f"📂 上傳的空間圖層 (面積：約 {uploaded_area:,.0f} m²)"
+        available_areas[option_name] = uploaded_area
+        
+    if map_data and map_data.get("all_drawings"):
+        for i, drawing in enumerate(map_data["all_drawings"]):
+            if drawing["geometry"]["type"] == "Polygon":
+                geom = shape(drawing["geometry"])
+                geod = Geod(ellps="WGS84")
+                area, _ = geod.geometry_area_perimeter(geom)
+                abs_area = abs(area)
+                
+                # 自動賦予對應的顏色球 (順序與 JS 變色腳本完全一致)
+                emoji = DRAW_EMOJIS[i % len(DRAW_EMOJIS)]
+                poly_name = f"多邊形 {i+1}"
+                option_name = f"{emoji} 手動圈繪 - {poly_name} (面積：約 {abs_area:,.0f} m²)"
+                
+                available_areas[option_name] = abs_area
+    
+    if available_areas:
+        st.markdown("---")
+        st.markdown("### 🧮 選擇計算目標")
+        st.write("系統偵測到畫面中包含多個範圍，請透過**顏色符號**與**面積大小**，選擇您要計算的目標：")
+        
+        options = list(available_areas.keys())
+        default_index = len(options) - 1 
+        
+        selected_source = st.radio("選擇目標", options, index=default_index, label_visibility="collapsed")
+        
+        final_area = available_areas[selected_source]
+        render_results(final_area)
