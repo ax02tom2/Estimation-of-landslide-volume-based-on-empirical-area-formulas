@@ -15,13 +15,9 @@ from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
 
 # -----------------------------------------------------------------------------
-# 系統設定 (已套用高相容性的空間地圖 Icon)
+# 系統設定
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="崩塌量體推估系統", page_icon="🗺️", layout="wide")
-
-# 初始化繪圖標籤記憶體 (用於在地圖上動態標示多邊形名稱)
-if 'drawn_polygons_info' not in st.session_state:
-    st.session_state.drawn_polygons_info = []
 
 st.title("⛰️ 崩塌量體推估系統 (面積經驗公式對照)")
 st.markdown("本系統整合多組實證經驗公式，支援**手動輸入**及**線上衛星底圖/空間檔案上傳**，快速推估崩塌量體 (V) 與平均滑動深度 (D)。")
@@ -37,6 +33,10 @@ FORMULAS = [
     {"name": "Larsen & Torres Sanchez (1998)", "formula": "V = 1.826 * A^0.989", "a": 1.826, "b": 0.989},
     {"name": "Martin et al. (2002)", "formula": "V = 1.0359 * A^0.88", "a": 1.0359, "b": 0.88}
 ]
+
+# 顏色對應表 (用於手動多邊形自動變色)
+DRAW_COLORS = ['#FF0000', '#0000FF', '#008000', '#800080', '#FFA500', '#8B4513', '#000000']
+DRAW_EMOJIS = ['🔴', '🔵', '🟢', '🟣', '🟠', '🟤', '⚫']
 
 TW_DISTRICTS = {
     "請選擇縣市...": ["請先選擇縣市"],
@@ -144,23 +144,47 @@ def process_spatial_file(uploaded_file):
         st.error(f"檔案解析失敗: {str(e)}")
         return None, 0, None
 
+# -----------------------------------------------------------------------------
+# 🚀 終極底層注入：多邊形自動上色與縮小編輯節點
+# -----------------------------------------------------------------------------
 def inject_folium_draw_fix(m):
-    js_injection = """
+    js_injection = f"""
     <script>
-        document.addEventListener("DOMContentLoaded", function() {
-            setTimeout(function() {
-                if (typeof L !== 'undefined' && L.Edit && L.Edit.PolyVerticesEdit) {
-                    L.Edit.PolyVerticesEdit.prototype.options.icon = new L.DivIcon({
+        document.addEventListener("DOMContentLoaded", function() {{
+            // 縮小編輯用的白色把手
+            setTimeout(function() {{
+                if (typeof L !== 'undefined' && L.Edit && L.Edit.PolyVerticesEdit) {{
+                    L.Edit.PolyVerticesEdit.prototype.options.icon = new L.DivIcon({{
                         iconSize: new L.Point(2, 2),
                         className: 'leaflet-div-icon leaflet-editing-icon'
-                    });
-                    L.Edit.PolyVerticesEdit.prototype.options.touchIcon = new L.DivIcon({
+                    }});
+                    L.Edit.PolyVerticesEdit.prototype.options.touchIcon = new L.DivIcon({{
                         iconSize: new L.Point(2, 2),
                         className: 'leaflet-div-icon leaflet-editing-icon leaflet-touch-icon'
-                    });
-                }
-            }, 1000);
-        });
+                    }});
+                }}
+            }}, 1000);
+
+            // 每 200 毫秒掃描一次地圖上的多邊形，依序賦予不同顏色
+            setInterval(function() {{
+                var colors = {DRAW_COLORS};
+                var panes = document.querySelectorAll('.leaflet-overlay-pane');
+                panes.forEach(function(pane) {{
+                    var paths = pane.querySelectorAll('path.leaflet-interactive');
+                    var polyIndex = 0;
+                    paths.forEach(function(path) {{
+                        var fillOpacity = path.getAttribute('fill-opacity');
+                        // 辨識條件：手動圈繪的多邊形預設 fillOpacity 約為 0.2，上傳的檔案我們設為 0
+                        if (fillOpacity !== '0' && fillOpacity !== 0) {{
+                            var color = colors[polyIndex % colors.length];
+                            path.setAttribute('stroke', color);
+                            path.setAttribute('fill', color);
+                            polyIndex++;
+                        }}
+                    }});
+                }});
+            }}, 200);
+        }});
     </script>
     """
     m.get_root().html.add_child(Element(js_injection))
@@ -208,7 +232,7 @@ with tab1:
 
 with tab2:
     st.subheader("在地圖上圈繪或上傳崩塌範圍")
-    st.info("💡 說明：地圖右上角可切換不同來源(年份)的衛星圖資比對。畫完圖形後，系統會在圖形中央自動標註名稱以利辨識。")
+    st.info("💡 說明：您可以手動繪製多個圖形，**系統會自動以不同顏色區分**，並在下方選單顯示對應顏色以便選擇。")
     
     col_map, col_controls = st.columns([3, 1])
     
@@ -265,7 +289,6 @@ with tab2:
             
         inject_folium_draw_fix(m) 
         
-        # 多種底圖選擇
         folium.TileLayer(
             tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
             attr='Google',
@@ -297,27 +320,6 @@ with tab2:
                 style_function=lambda x: {'fillColor': 'transparent', 'color': '#ff0000', 'weight': 2, 'fillOpacity': 0}
             ).add_to(m)
             
-        # 🚀 修正錯誤：將 className 改為正確的 class_name
-        for info in st.session_state.drawn_polygons_info:
-            folium.Marker(
-                location=info["centroid"],
-                icon=folium.DivIcon(
-                    class_name="dummy", # 這裡修正了！
-                    html=f"""
-                        <div style="
-                            font-size: 16px; 
-                            color: #FFFF00; 
-                            font-weight: 900; 
-                            text-shadow: 2px 2px 4px #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000; 
-                            white-space: nowrap; 
-                            transform: translate(-50%, -50%);
-                        ">
-                            {info['name']}
-                        </div>
-                    """
-                )
-            ).add_to(m)
-            
         Draw(export=True, position='topleft', draw_options={
             'polyline': False, 'rectangle': False, 'circle': False, 
             'circlemarker': False, 'marker': False, 
@@ -329,17 +331,14 @@ with tab2:
         map_data = st_folium(m, width="100%", height=650, key="folium_map_satellite")
     
     # -------------------------------------------------------------------------
-    # 🚀 面積收集、動態標籤生成與 UI 選單聯動
+    # 🚀 顏色聯動：將畫布上的顏色同步顯示在選項名稱上
     # -------------------------------------------------------------------------
     available_areas = {}
-    current_polygons_info = [] 
     
-    # 1. 上傳檔案的面積
     if spatial_file and uploaded_area > 0:
-        option_name = f"📂 上傳的空間圖層 (約 {uploaded_area:,.0f} m²)"
+        option_name = f"📂 上傳的空間圖層 (面積：約 {uploaded_area:,.0f} m²)"
         available_areas[option_name] = uploaded_area
         
-    # 2. 地圖上手動圈繪的所有面積與中心點
     if map_data and map_data.get("all_drawings"):
         for i, drawing in enumerate(map_data["all_drawings"]):
             if drawing["geometry"]["type"] == "Polygon":
@@ -348,28 +347,17 @@ with tab2:
                 area, _ = geod.geometry_area_perimeter(geom)
                 abs_area = abs(area)
                 
-                # 計算中心點，並將座標四捨五入避免無窮迴圈
-                centroid = geom.centroid
+                # 自動賦予對應的顏色球 (順序與 JS 注入的變色邏輯完全一致)
+                emoji = DRAW_EMOJIS[i % len(DRAW_EMOJIS)]
                 poly_name = f"多邊形 {i+1}"
-                current_polygons_info.append({
-                    "name": poly_name,
-                    "centroid": [round(centroid.y, 6), round(centroid.x, 6)]
-                })
+                option_name = f"{emoji} 手動圈繪 - {poly_name} (面積：約 {abs_area:,.0f} m²)"
                 
-                # 建立在 UI 選單上的精確文字 (包含名稱與面積)
-                option_name = f"🖍️ {poly_name} (約 {abs_area:,.0f} m²)"
                 available_areas[option_name] = abs_area
     
-    # 🌟 核心邏輯：如果使用者剛畫完一個圖形，這裡的數量/中心點會與記憶體不同
-    if current_polygons_info != st.session_state.drawn_polygons_info:
-        st.session_state.drawn_polygons_info = current_polygons_info
-        st.rerun()
-    
-    # 3. 顯示選擇器並進行計算
     if available_areas:
         st.markdown("---")
         st.markdown("### 🧮 選擇計算目標")
-        st.write("系統偵測到畫面中包含多個範圍，請透過**地圖上的標註名稱**選擇您要計算的目標：")
+        st.write("系統偵測到畫面中包含多個範圍，請透過**顏色符號**與**面積大小**，選擇您要計算的目標：")
         
         options = list(available_areas.keys())
         default_index = len(options) - 1 
