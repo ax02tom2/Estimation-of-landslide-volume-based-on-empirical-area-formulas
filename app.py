@@ -10,9 +10,9 @@ import json
 import zipfile
 import os
 import tempfile
-from branca.element import Element
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
+from branca.element import Element
 
 # -----------------------------------------------------------------------------
 # 系統設定
@@ -33,10 +33,6 @@ FORMULAS = [
     {"name": "Larsen & Torres Sanchez (1998)", "formula": "V = 1.826 * A^0.989", "a": 1.826, "b": 0.989},
     {"name": "Martin et al. (2002)", "formula": "V = 1.0359 * A^0.88", "a": 1.0359, "b": 0.88}
 ]
-
-# 顏色對應表 (從橘色開始，依序變化)
-DRAW_COLORS = ['#FF8C00', '#800080', '#008000', '#0000FF', '#8B4513', '#FF00FF', '#000000']
-DRAW_EMOJIS = ['🟠', '🟣', '🟢', '🔵', '🟤', '🟪', '⚫']
 
 TW_DISTRICTS = {
     "請選擇縣市...": ["請先選擇縣市"],
@@ -145,11 +141,9 @@ def process_spatial_file(uploaded_file):
         return None, 0, None
 
 # -----------------------------------------------------------------------------
-# 🚀 真正能生效的底層注入腳本：使用 Folium 的 .script 來保證執行
+# 保留唯一穩定運作的「縮小編輯白點」樣式 (完全拔除會失效的變色腳本)
 # -----------------------------------------------------------------------------
 def inject_folium_draw_fix(m):
-    
-    # 1. 縮小白點 CSS (透過 header 注入保證有效)
     css_injection = """
     <style>
     .leaflet-div-icon.leaflet-editing-icon {
@@ -162,65 +156,6 @@ def inject_folium_draw_fix(m):
     </style>
     """
     m.get_root().header.add_child(Element(css_injection))
-
-    # 2. 變色與節點邏輯 (直接注入到 Folium 預設的 Script 區塊，絕對不會被 Streamlit 阻擋)
-    js_logic = """
-    // 縮小白點圖示設定
-    setTimeout(function() {
-        if (typeof L !== 'undefined' && L.Edit && L.Edit.PolyVerticesEdit) {
-            L.Edit.PolyVerticesEdit.prototype.options.icon = new L.DivIcon({
-                iconSize: new L.Point(2, 2),
-                className: 'leaflet-div-icon leaflet-editing-icon'
-            });
-            L.Edit.PolyVerticesEdit.prototype.options.touchIcon = new L.DivIcon({
-                iconSize: new L.Point(2, 2),
-                className: 'leaflet-div-icon leaflet-editing-icon leaflet-touch-icon'
-            });
-        }
-    }, 1000);
-
-    // 強制變色迴圈
-    setInterval(function() {
-        var colors = COLOR_ARRAY_PLACEHOLDER;
-        var paths = document.getElementsByTagName('path');
-        var drawIndex = 0;
-        
-        for (var i = 0; i < paths.length; i++) {
-            var path = paths[i];
-            var stroke = path.getAttribute('stroke');
-            var styleStroke = path.style.stroke;
-            var fill = path.getAttribute('fill');
-            
-            // 【過濾 1】如果是我們上傳的紅框，絕對跳過
-            var isUpload = false;
-            if (stroke && (stroke.toLowerCase() === '#ff0000' || stroke === 'red' || stroke === 'rgb(255, 0, 0)')) {
-                isUpload = true;
-            }
-            if (styleStroke && (styleStroke.toLowerCase() === '#ff0000' || styleStroke === 'red' || styleStroke === 'rgb(255, 0, 0)')) {
-                isUpload = true;
-            }
-            if (isUpload) continue;
-            
-            // 【過濾 2】只針對「已經畫完、且有底色」的多邊形變色 (避免把正在畫的虛線或指引線變色)
-            if (!fill || fill === 'none') {
-                continue; 
-            }
-            
-            // 強制變色！
-            var c = colors[drawIndex % colors.length];
-            path.setAttribute('stroke', c);
-            path.setAttribute('fill', c);
-            path.style.stroke = c;
-            path.style.fill = c;
-            drawIndex++;
-        }
-    }, 200);
-    """
-    
-    # 替換顏色變數
-    js_final = js_logic.replace("COLOR_ARRAY_PLACEHOLDER", str(DRAW_COLORS))
-    # 使用 .script.add_child 確保代碼直接寫在 Folium 的執行域中，繞過所有阻擋！
-    m.get_root().script.add_child(Element(js_final))
 
 def safe_geocode(query):
     try:
@@ -253,7 +188,7 @@ with tab1:
 
 with tab2:
     st.subheader("在地圖上圈繪或上傳崩塌範圍")
-    st.info("💡 說明：您可以手動繪製多個圖形，系統會**自動依序變色**，並在下方選單顯示對應顏色以便選擇。")
+    st.info("💡 受限於網頁框架底層限制，您畫的多邊形將維持預設的藍色。請透過下方「對照表」的面積與經緯度鎖定目標。")
     
     col_map, col_controls = st.columns([3, 1])
     
@@ -352,12 +287,12 @@ with tab2:
         map_data = st_folium(m, width="100%", height=650, key="folium_map_satellite")
     
     # -------------------------------------------------------------------------
-    # 🚀 顏色聯動：將畫布上的顏色同步顯示在選項名稱上
+    # 🚀 將操作面板改為詳盡的「測量紀錄對照表」
     # -------------------------------------------------------------------------
     available_areas = {}
     
     if spatial_file and uploaded_area > 0:
-        option_name = f"📂 上傳的空間圖層 (面積：約 {uploaded_area:,.0f} m²)"
+        option_name = f"📂 上傳圖層 ｜ 面積: 約 {uploaded_area:,.0f} m²"
         available_areas[option_name] = uploaded_area
         
     if map_data and map_data.get("all_drawings"):
@@ -368,17 +303,21 @@ with tab2:
                 area, _ = geod.geometry_area_perimeter(geom)
                 abs_area = abs(area)
                 
-                # 自動賦予對應的顏色球 (順序與 JS 變色腳本完全一致)
-                emoji = DRAW_EMOJIS[i % len(DRAW_EMOJIS)]
-                poly_name = f"多邊形 {i+1}"
-                option_name = f"{emoji} 手動圈繪 - {poly_name} (面積：約 {abs_area:,.0f} m²)"
+                # 計算中心點，讓使用者就算面積一樣也能靠座標區分
+                centroid = geom.centroid
+                lat = round(centroid.y, 4)
+                lon = round(centroid.x, 4)
+                
+                # 選單文字改為測量表格的形式
+                poly_name = f"圖形 {i+1} (最舊)" if i == 0 else f"圖形 {i+1} (最新)" if i == len(map_data["all_drawings"])-1 else f"圖形 {i+1}"
+                option_name = f"🖍️ {poly_name} ｜ 面積: 約 {abs_area:,.0f} m² ｜ 中心座標: (N {lat}, E {lon})"
                 
                 available_areas[option_name] = abs_area
     
     if available_areas:
         st.markdown("---")
-        st.markdown("### 🧮 選擇計算目標")
-        st.write("系統偵測到畫面中包含多個範圍，請透過**顏色符號**與**面積大小**，選擇您要計算的目標：")
+        st.markdown("### 🧮 測量紀錄對照與計算")
+        st.write("請依據下方表格的 **繪製順序**、**面積** 或 **中心座標**，選擇您要推估量體的範圍：")
         
         options = list(available_areas.keys())
         default_index = len(options) - 1 
